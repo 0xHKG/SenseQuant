@@ -7,28 +7,763 @@ Refactor scaffold into production-grade structure with typing, linting, tests, a
 - Keep current features (dry-run, Breeze adapter, basic strategies), but improve quality + stability.
 - Use layered architecture: adapters, domain (strategies), services (engine), app (main).
 - Enforce tooling: ruff, mypy, pytest; add pre-commit optional.
+- Align with Architecture v1.1 (see docs/architecture.md).
+
+---
 
 ## Tasks
-1) Restructure folders:
-   - src/config.py → src/app/config.py
-   - src/breeze_client.py → src/adapters/breeze_client.py
-   - src/strategies/* → src/domain/strategies/*
-   - src/engine.py → src/services/engine.py
-   - src/main.py → src/app/main.py
-2) Add typing everywhere; enable mypy strict on src/.
-3) Add ruff config (pep8/flake) and fix all lint.
-4) Strengthen BreezeClient:
-   - clear dataclasses/DTOs for requests/responses
-   - robust error handling, retries, timeouts, rate-limit backoff
-   - deterministic dry-run behavior, structured logs
-5) Add pytest for adapter & strategies (mocks for Breeze)
-6) Add Makefile/commands: `make lint`, `make test`, `make run`.
-7) Update docs/architecture.md with final module map.
 
-## Acceptance
-- AC1: `ruff .` and `mypy src/` pass (no errors)
-- AC2: `pytest -q` passes (≥ 80% coverage on adapters/strategies)
-- AC3: Breeze adapter gracefully handles error scenarios (network, bad auth, bad symbol)
-- AC4: Dry-run produces structured logs for all would-be orders
-- AC5: docs/architecture.md matches folder layout
+### 1. Restructure to Layered Layout
 
+**1.1 Create new folder structure**
+```
+src/
+├── adapters/
+│   ├── __init__.py
+│   ├── breeze_client.py          # Move from src/breeze_client.py
+│   └── sentiment_provider.py     # Move from src/sentiment.py
+├── domain/
+│   ├── __init__.py
+│   ├── types.py                  # NEW: DTOs (Bar, Signal, Order, Position, etc.)
+│   ├── features.py               # NEW: TA indicator calculations
+│   └── strategies/
+│       ├── __init__.py
+│       ├── base.py               # NEW: Abstract Strategy interface
+│       ├── intraday.py           # Move from src/strategies/intraday.py
+│       └── swing.py              # Move from src/strategies/swing.py
+├── services/
+│   ├── __init__.py
+│   ├── engine.py                 # Move from src/engine.py
+│   ├── risk_manager.py           # NEW: Risk checks, circuit-breaker
+│   ├── position_sizer.py         # NEW: Position sizing logic
+│   ├── execution.py              # NEW: Order placement orchestration
+│   ├── journal.py                # NEW: Trade journal CSV writer
+│   └── teacher_student.py        # NEW: EOD learning loop (stub)
+├── app/
+│   ├── __init__.py
+│   ├── config.py                 # Move from src/config.py
+│   ├── logger.py                 # NEW: Structured JSON logging setup
+│   └── cli.py                    # Move from src/main.py (rename)
+└── main.py                       # NEW: Thin entry point (calls app/cli.py)
+
+tests/
+├── __init__.py
+├── unit/
+│   ├── __init__.py
+│   ├── test_breeze_client.py     # Move from tests/test_breeze_client.py
+│   ├── test_types.py             # NEW: Test DTOs
+│   ├── test_strategies.py        # NEW: Test intraday/swing
+│   ├── test_risk_manager.py      # NEW: Test risk checks
+│   └── test_journal.py           # NEW: Test CSV writer
+├── integration/
+│   ├── __init__.py
+│   └── test_backtest.py          # NEW: End-to-end backtest scenario
+└── conftest.py                   # NEW: Shared fixtures
+
+data/
+├── historical/                   # Cached OHLCV CSVs
+└── models/                       # Student model weights
+
+logs/
+├── app.log                       # Structured JSON logs
+└── trades.csv                    # Trade journal
+```
+
+**1.2 Migration checklist**
+- [ ] Create all new directories with `__init__.py`
+- [ ] Move existing files to new locations
+- [ ] Update all import statements across codebase
+- [ ] Remove old empty directories (`src/strategies/`)
+- [ ] Verify `python -m src.main` still runs after migration
+
+---
+
+### 2. Add `src/domain/types.py` — DTOs & Enums
+
+**File: `src/domain/types.py`**
+
+Define all data transfer objects using `dataclasses` or `pydantic.BaseModel`:
+
+```python
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+from typing import Optional
+
+class OrderSide(str, Enum):
+    BUY = "BUY"
+    SELL = "SELL"
+
+class OrderType(str, Enum):
+    MARKET = "MARKET"
+    LIMIT = "LIMIT"
+
+class OrderStatus(str, Enum):
+    PENDING = "PENDING"
+    PLACED = "PLACED"
+    FILLED = "FILLED"
+    REJECTED = "REJECTED"
+    CANCELLED = "CANCELLED"
+
+class SignalDirection(str, Enum):
+    LONG = "LONG"
+    SHORT = "SHORT"
+    CLOSE = "CLOSE"
+
+@dataclass
+class Bar:
+    """OHLCV bar normalized from Breeze API."""
+    symbol: str
+    timestamp: datetime
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int
+    interval: str  # "1minute", "5minute", "1day"
+
+@dataclass
+class Signal:
+    """Trading signal generated by strategy."""
+    symbol: str
+    direction: SignalDirection
+    confidence: float  # 0.0 to 1.0
+    timestamp: datetime
+    reason: str
+    sentiment_score: Optional[float] = None
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+
+@dataclass
+class Order:
+    """Order request to be placed via Breeze."""
+    order_id: str  # UUID; deterministic in dry-run
+    symbol: str
+    side: OrderSide
+    order_type: OrderType
+    quantity: int
+    price: Optional[float]  # None for market orders
+    timestamp: datetime
+    signal: Optional[Signal] = None  # Link to originating signal
+
+@dataclass
+class OrderResponse:
+    """Normalized response from Breeze place_order."""
+    order_id: str
+    status: OrderStatus
+    message: str
+    exchange_order_id: Optional[str] = None
+    timestamp: datetime
+
+@dataclass
+class Position:
+    """Current open position."""
+    symbol: str
+    quantity: int
+    avg_price: float
+    current_price: float
+    unrealized_pnl: float
+    entry_timestamp: datetime
+    stop_loss: Optional[float] = None
+    take_profit: Optional[float] = None
+```
+
+**Tasks:**
+- [ ] Create `src/domain/types.py` with all DTOs
+- [ ] Add docstrings to all classes
+- [ ] Write unit tests in `tests/unit/test_types.py` (validation, serialization)
+
+---
+
+### 3. Tooling — pyproject.toml & Makefile
+
+**3.1 Update `pyproject.toml`**
+
+Ensure proper configuration for ruff, mypy, pytest:
+
+```toml
+[tool.poetry]
+name = "sensequant"
+version = "0.1.0"
+description = "AI trading assistant for Indian equities"
+authors = ["Your Name <you@example.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+pydantic = "^2.0"
+pydantic-settings = "^2.0"
+python-dotenv = "^1.0"
+breeze-connect = "^1.0"
+tenacity = "^8.0"
+pandas = "^2.0"
+pytz = "^2023.3"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4"
+pytest-cov = "^4.1"
+pytest-mock = "^3.12"
+mypy = "^1.7"
+ruff = "^0.1"
+pre-commit = "^3.5"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+]
+ignore = ["E501"]  # line too long (handled by formatter)
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_any_generics = false
+exclude = ["tests/"]
+
+[[tool.mypy.overrides]]
+module = "breeze_connect.*"
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_functions = "test_*"
+addopts = "-v --cov=src --cov-report=term-missing --cov-fail-under=70"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+```
+
+**3.2 Create `Makefile`**
+
+```makefile
+.PHONY: help install lint format type test test-cov run clean
+
+help:
+	@echo "Available targets:"
+	@echo "  install    - Install dependencies via poetry"
+	@echo "  lint       - Run ruff linter (check only)"
+	@echo "  format     - Run ruff formatter (auto-fix)"
+	@echo "  type       - Run mypy type checker"
+	@echo "  test       - Run pytest"
+	@echo "  test-cov   - Run pytest with coverage report"
+	@echo "  run        - Run application in dry-run mode"
+	@echo "  clean      - Remove generated files"
+
+install:
+	poetry install
+
+lint:
+	poetry run ruff check .
+
+format:
+	poetry run ruff format .
+	poetry run ruff check --fix .
+
+type:
+	poetry run mypy src/
+
+test:
+	poetry run pytest -q
+
+test-cov:
+	poetry run pytest --cov=src --cov-report=html --cov-report=term
+
+run:
+	poetry run python -m src.main --mode=dry-run
+
+clean:
+	find . -type d -name "__pycache__" -exec rm -rf {} +
+	find . -type f -name "*.pyc" -delete
+	rm -rf .pytest_cache .mypy_cache .coverage htmlcov
+```
+
+**Tasks:**
+- [ ] Update `pyproject.toml` with correct dependencies and tool configs
+- [ ] Create `Makefile` with targets: `lint`, `format`, `type`, `test`, `test-cov`, `run`
+- [ ] Verify `make lint`, `make type`, `make test` all pass after refactor
+- [ ] Add `.pre-commit-config.yaml` (optional) for git hooks
+
+---
+
+### 4. Breeze Adapter — Robust Error Handling
+
+**File: `src/adapters/breeze_client.py`**
+
+**4.1 Error Taxonomy**
+
+```python
+class BreezeError(Exception):
+    """Base exception for Breeze API errors."""
+    def is_transient(self) -> bool:
+        return False
+
+class BreezeConnectionError(BreezeError):
+    """Network/connection errors (retryable)."""
+    def is_transient(self) -> bool:
+        return True
+
+class BreezeAuthError(BreezeError):
+    """Authentication failure (not retryable)."""
+    pass
+
+class BreezeRateLimitError(BreezeError):
+    """HTTP 429 rate limit (retryable with backoff)."""
+    def is_transient(self) -> bool:
+        return True
+
+class BreezeValidationError(BreezeError):
+    """Invalid symbol, bad params (not retryable)."""
+    pass
+
+class BreezeServerError(BreezeError):
+    """HTTP 5xx server error (retryable)."""
+    def is_transient(self) -> bool:
+        return True
+```
+
+**4.2 Retry Logic with Tenacity**
+
+```python
+import tenacity
+from tenacity import (
+    retry,
+    stop_after_attempt,
+    wait_exponential,
+    retry_if_exception_type,
+    before_sleep_log,
+)
+
+class BreezeClient:
+    def __init__(self, config: Settings, logger: logging.Logger):
+        self.config = config
+        self.logger = logger
+        self._api = None  # breeze_connect.BreezeConnect instance
+        self._connect()
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=2, max=30),
+        retry=retry_if_exception_type((BreezeConnectionError, BreezeServerError)),
+        before_sleep=before_sleep_log(logger, logging.WARNING),
+    )
+    def get_historical(
+        self, symbol: str, from_date: str, to_date: str, interval: str = "1minute"
+    ) -> list[Bar]:
+        """Fetch historical OHLCV with retry on transient errors."""
+        try:
+            resp = self._api.get_historical_data(
+                interval=interval,
+                from_date=from_date,
+                to_date=to_date,
+                stock_code=symbol,
+                exchange_code="NSE",
+            )
+            if resp["Status"] != 200:
+                self._handle_error_response(resp)
+            return self._normalize_bars(resp["Success"], symbol, interval)
+        except (ConnectionError, TimeoutError) as e:
+            raise BreezeConnectionError(f"Connection failed: {e}") from e
+        except Exception as e:
+            raise BreezeServerError(f"Unexpected error: {e}") from e
+
+    def place_order(self, order: Order) -> OrderResponse:
+        """Place order with single retry on transient errors."""
+        if self.config.mode == "dry-run":
+            return self._mock_order_response(order)
+
+        try:
+            resp = self._place_order_impl(order)
+            return resp
+        except BreezeError as e:
+            if e.is_transient():
+                self.logger.warning(f"Retrying order {order.order_id} after transient error")
+                time.sleep(2)
+                resp = self._place_order_impl(order)
+                return resp
+            else:
+                self.logger.error(f"Non-retryable error for order {order.order_id}: {e}")
+                raise
+
+    def _place_order_impl(self, order: Order) -> OrderResponse:
+        """Internal order placement with error handling."""
+        try:
+            resp = self._api.place_order(
+                stock_code=order.symbol,
+                exchange_code="NSE",
+                product="INTRADAY",
+                action=order.side.value,
+                order_type=order.order_type.value,
+                quantity=str(order.quantity),
+                price=str(order.price) if order.price else "0",
+            )
+            if resp["Status"] == 429:
+                raise BreezeRateLimitError("Rate limit exceeded")
+            if resp["Status"] >= 500:
+                raise BreezeServerError(f"Server error: {resp}")
+            if resp["Status"] != 200:
+                raise BreezeValidationError(f"Order rejected: {resp}")
+
+            return OrderResponse(
+                order_id=order.order_id,
+                status=OrderStatus.PLACED,
+                message="Order placed successfully",
+                exchange_order_id=resp.get("Success", {}).get("order_id"),
+                timestamp=datetime.now(pytz.timezone("Asia/Kolkata")),
+            )
+        except (ConnectionError, TimeoutError) as e:
+            raise BreezeConnectionError(f"Connection failed: {e}") from e
+
+    def _mock_order_response(self, order: Order) -> OrderResponse:
+        """Deterministic dry-run response."""
+        # Use hash of order details for deterministic ID
+        mock_id = f"DRYRUN-{hash((order.symbol, order.side, order.quantity)) % 100000:05d}"
+        self.logger.info(
+            "DRY-RUN order",
+            extra={
+                "order_id": order.order_id,
+                "symbol": order.symbol,
+                "side": order.side.value,
+                "quantity": order.quantity,
+                "price": order.price,
+                "mock_exchange_id": mock_id,
+            },
+        )
+        return OrderResponse(
+            order_id=order.order_id,
+            status=OrderStatus.FILLED,
+            message="Dry-run order (simulated)",
+            exchange_order_id=mock_id,
+            timestamp=datetime.now(pytz.timezone("Asia/Kolkata")),
+        )
+
+    def _normalize_bars(self, raw_data: list, symbol: str, interval: str) -> list[Bar]:
+        """Normalize Breeze response to Bar DTOs."""
+        bars = []
+        for item in raw_data:
+            bars.append(
+                Bar(
+                    symbol=symbol,
+                    timestamp=datetime.fromisoformat(item["datetime"]),
+                    open=float(item["open"]),
+                    high=float(item["high"]),
+                    low=float(item["low"]),
+                    close=float(item["close"]),
+                    volume=int(item["volume"]),
+                    interval=interval,
+                )
+            )
+        return bars
+
+    def _handle_error_response(self, resp: dict) -> None:
+        """Classify and raise appropriate BreezeError."""
+        status = resp.get("Status", 0)
+        message = resp.get("Error", "Unknown error")
+
+        if status == 401:
+            raise BreezeAuthError(f"Authentication failed: {message}")
+        elif status == 429:
+            raise BreezeRateLimitError(f"Rate limit exceeded: {message}")
+        elif 400 <= status < 500:
+            raise BreezeValidationError(f"Bad request: {message}")
+        elif status >= 500:
+            raise BreezeServerError(f"Server error: {message}")
+        else:
+            raise BreezeError(f"Unknown error: {message}")
+```
+
+**4.3 Structured JSON Logging (No Secrets)**
+
+```python
+# In app/logger.py
+import logging
+import json
+from pythonjsonlogger import jsonlogger
+
+class SanitizingJsonFormatter(jsonlogger.JsonFormatter):
+    """Custom formatter that redacts sensitive fields."""
+
+    SENSITIVE_KEYS = {"api_key", "api_secret", "session_token", "password", "token"}
+
+    def process_log_record(self, log_record: dict) -> dict:
+        """Redact sensitive fields before logging."""
+        for key in list(log_record.keys()):
+            if any(sensitive in key.lower() for sensitive in self.SENSITIVE_KEYS):
+                log_record[key] = "***REDACTED***"
+        return log_record
+
+def setup_logger(name: str, level: str = "INFO") -> logging.Logger:
+    """Setup structured JSON logger."""
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+
+    handler = logging.StreamHandler()
+    formatter = SanitizingJsonFormatter(
+        "%(timestamp)s %(level)s %(name)s %(message)s",
+        timestamp=True,
+    )
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+
+    return logger
+```
+
+**Tasks:**
+- [ ] Implement error taxonomy (BreezeError hierarchy)
+- [ ] Add tenacity retry logic to `get_historical()` (3 attempts, exp backoff 2-30s)
+- [ ] Add single retry to `place_order()` for transient errors
+- [ ] Implement deterministic dry-run order IDs (hash-based)
+- [ ] Create `app/logger.py` with JSON formatter + secret redaction
+- [ ] Add timeout parameter to all Breeze API calls (default 30s)
+- [ ] Write unit tests: `tests/unit/test_breeze_client.py` (mock API responses)
+  - Test successful historical fetch
+  - Test retry on ConnectionError
+  - Test rate limit handling (429)
+  - Test auth error (401) not retried
+  - Test dry-run order determinism
+
+---
+
+### 5. Trade Journal — CSV Writer
+
+**File: `src/services/journal.py`**
+
+```python
+import csv
+from pathlib import Path
+from datetime import datetime
+import logging
+from typing import Optional
+
+class TradeJournal:
+    """CSV-based trade journal with rotation."""
+
+    SCHEMA = [
+        "timestamp",
+        "symbol",
+        "side",
+        "order_type",
+        "quantity",
+        "price",
+        "order_id",
+        "exchange_order_id",
+        "status",
+        "pnl",
+        "strategy",
+        "reason",
+    ]
+
+    def __init__(self, log_dir: Path, logger: logging.Logger):
+        self.log_dir = log_dir
+        self.logger = logger
+        self.log_dir.mkdir(parents=True, exist_ok=True)
+        self._current_file: Optional[Path] = None
+        self._writer: Optional[csv.DictWriter] = None
+        self._file_handle = None
+        self._rotate_if_needed()
+
+    def _rotate_if_needed(self) -> None:
+        """Create new CSV file daily at midnight IST."""
+        today = datetime.now(pytz.timezone("Asia/Kolkata")).date()
+        expected_file = self.log_dir / f"trades_{today.isoformat()}.csv"
+
+        if self._current_file != expected_file:
+            if self._file_handle:
+                self._file_handle.close()
+
+            self._current_file = expected_file
+            file_exists = expected_file.exists()
+
+            self._file_handle = open(expected_file, "a", newline="")
+            self._writer = csv.DictWriter(self._file_handle, fieldnames=self.SCHEMA)
+
+            if not file_exists:
+                self._writer.writeheader()
+                self.logger.info(f"Created new trade journal: {expected_file}")
+
+    def log_trade(
+        self,
+        order: Order,
+        response: OrderResponse,
+        pnl: Optional[float] = None,
+        strategy: str = "",
+    ) -> None:
+        """Append trade to journal."""
+        self._rotate_if_needed()
+
+        row = {
+            "timestamp": order.timestamp.isoformat(),
+            "symbol": order.symbol,
+            "side": order.side.value,
+            "order_type": order.order_type.value,
+            "quantity": order.quantity,
+            "price": order.price or "",
+            "order_id": order.order_id,
+            "exchange_order_id": response.exchange_order_id or "",
+            "status": response.status.value,
+            "pnl": f"{pnl:.2f}" if pnl is not None else "",
+            "strategy": strategy,
+            "reason": order.signal.reason if order.signal else "",
+        }
+
+        self._writer.writerow(row)
+        self._file_handle.flush()
+        self.logger.info(f"Trade logged: {order.symbol} {order.side.value} {order.quantity}")
+
+    def close(self) -> None:
+        """Close journal file."""
+        if self._file_handle:
+            self._file_handle.close()
+```
+
+**Tasks:**
+- [ ] Create `src/services/journal.py` with TradeJournal class
+- [ ] Implement daily rotation (new file at midnight IST)
+- [ ] Add CSV schema with all required fields
+- [ ] Add cleanup policy in docs: retain 30 days, compress after 7 days
+- [ ] Write unit tests: `tests/unit/test_journal.py`
+  - Test CSV creation and header write
+  - Test row append
+  - Test daily rotation
+
+---
+
+### 6. Acceptance Criteria (Expanded)
+
+#### AC1: Linting & Formatting
+- [ ] **GIVEN** all code is refactored
+- [ ] **WHEN** running `make lint` (ruff check .)
+- [ ] **THEN** exit code is 0, no errors reported
+- [ ] **AND** all imports are sorted (isort)
+- [ ] **AND** line length ≤ 100 characters
+- [ ] **AND** no unused imports or variables
+
+#### AC2: Type Checking
+- [ ] **GIVEN** all modules have type hints
+- [ ] **WHEN** running `make type` (mypy src/)
+- [ ] **THEN** exit code is 0, no type errors
+- [ ] **AND** strict mode is enabled
+- [ ] **AND** all function signatures are fully typed
+
+#### AC3: Unit Tests & Coverage
+- [ ] **GIVEN** tests exist for adapters, strategies, services
+- [ ] **WHEN** running `make test-cov`
+- [ ] **THEN** all tests pass (pytest exit code 0)
+- [ ] **AND** coverage ≥ 70% on src/ (fail build if below)
+- [ ] **AND** coverage on adapters/breeze_client.py ≥ 80%
+- [ ] **AND** coverage on domain/strategies/*.py ≥ 80%
+
+#### AC4: Breeze Adapter Error Handling
+- [ ] **GIVEN** Breeze API returns errors
+- [ ] **WHEN** connection fails (network error)
+- [ ] **THEN** client retries 3 times with exponential backoff (2s, 4s, 8s)
+- [ ] **AND** logs each retry attempt
+- [ ] **WHEN** HTTP 429 rate limit error
+- [ ] **THEN** client backs off and retries
+- [ ] **WHEN** HTTP 401 auth error
+- [ ] **THEN** client raises BreezeAuthError without retry
+- [ ] **WHEN** invalid symbol (400 error)
+- [ ] **THEN** client raises BreezeValidationError without retry
+- [ ] **AND** all errors are logged with context (symbol, params)
+
+#### AC5: Deterministic Dry-Run Behavior
+- [ ] **GIVEN** mode=dry-run in config
+- [ ] **WHEN** place_order() is called
+- [ ] **THEN** no real Breeze API call is made
+- [ ] **AND** deterministic order ID is returned (hash-based)
+- [ ] **AND** structured JSON log is emitted with order details
+- [ ] **AND** log does NOT contain API keys/secrets
+
+#### AC6: Structured Logging (No Secrets)
+- [ ] **GIVEN** logger is configured
+- [ ] **WHEN** any log is emitted
+- [ ] **THEN** output is valid JSON
+- [ ] **AND** contains fields: timestamp (ISO8601+TZ), level, component, message
+- [ ] **AND** any field matching SENSITIVE_KEYS is redacted as "***REDACTED***"
+- [ ] **AND** timezone is IST (Asia/Kolkata)
+
+#### AC7: Trade Journal
+- [ ] **GIVEN** TradeJournal is initialized
+- [ ] **WHEN** first trade is logged
+- [ ] **THEN** CSV file is created in logs/ directory
+- [ ] **AND** header row matches SCHEMA
+- [ ] **WHEN** midnight IST passes
+- [ ] **THEN** new CSV file is created with date suffix
+- [ ] **WHEN** trade is logged
+- [ ] **THEN** row is appended with all fields (timestamp, symbol, side, qty, price, pnl, reason)
+- [ ] **AND** file is flushed immediately
+
+#### AC8: Documentation Updated
+- [ ] **GIVEN** folder restructure is complete
+- [ ] **WHEN** reading docs/architecture.md
+- [ ] **THEN** module map matches actual src/ layout
+- [ ] **AND** all file paths are correct (e.g., src/adapters/breeze_client.py)
+- [ ] **AND** data flow diagram reflects layered architecture
+
+#### AC9: Runbook Notes
+- [ ] **GIVEN** docs/architecture.md Section 7
+- [ ] **WHEN** reading Non-Functional Constraints
+- [ ] **THEN** runbook includes:
+  - **EOD Square-Off**: Instructions for force-closing intraday positions at 15:29 IST
+  - **Graceful Shutdown**: SIGINT/SIGTERM handler steps (stop signals, close positions, flush logs, disconnect)
+  - **Memory Footprint**: Techniques to stay < 300MB (streaming, rolling windows, GC)
+  - **Log Rotation**: Daily at midnight IST, 30-day retention, 7-day compression
+
+---
+
+## Definition of Done
+
+- [ ] All tasks checked off above
+- [ ] `make lint` passes (exit 0)
+- [ ] `make type` passes (exit 0)
+- [ ] `make test-cov` passes with ≥ 70% coverage
+- [ ] All 9 acceptance criteria validated
+- [ ] docs/architecture.md updated with final module map
+- [ ] PR reviewed and approved
+- [ ] Merged to main branch
+
+---
+
+## Estimates
+
+- Restructure folders: 2h
+- Create domain/types.py: 1h
+- Update pyproject.toml + Makefile: 1h
+- Breeze adapter error handling: 3h
+- Trade journal CSV writer: 1h
+- Unit tests (adapters, strategies): 4h
+- Fix linting/typing issues: 2h
+- Update docs/architecture.md: 1h
+- **Total: ~15h (2 days)**
+
+---
+
+## Dependencies
+
+- None (foundational refactor)
+
+---
+
+## Risks
+
+- **Risk**: Import path changes may break existing code.
+  - **Mitigation**: Automated search/replace for import statements; run tests after each file move.
+- **Risk**: Breeze API error codes may differ from documented behavior.
+  - **Mitigation**: Add defensive error handling; log unknown errors for analysis.
+- **Risk**: Test coverage may be difficult to achieve for Breeze WebSocket (live feed).
+  - **Mitigation**: Focus v1 on HTTP API; defer WebSocket to US-001.
