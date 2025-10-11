@@ -29,8 +29,12 @@ class Settings(BaseSettings):  # type: ignore[misc]
     per_trade_risk_pct: float = Field(0.01, validation_alias="PER_TRADE_RISK_PCT")
 
     # Intraday Strategy
-    intraday_bar_interval: Literal["1minute"] = Field("1minute", validation_alias="INTRADAY_BAR_INTERVAL")
-    intraday_feature_lookback_minutes: int = Field(60, validation_alias="INTRADAY_FEATURE_LOOKBACK_MINUTES")
+    intraday_bar_interval: Literal["1minute"] = Field(
+        "1minute", validation_alias="INTRADAY_BAR_INTERVAL"
+    )
+    intraday_feature_lookback_minutes: int = Field(
+        60, validation_alias="INTRADAY_FEATURE_LOOKBACK_MINUTES"
+    )
     intraday_tick_seconds: int = Field(5, validation_alias="INTRADAY_TICK_SECONDS")
     intraday_sma_period: int = Field(20, validation_alias="INTRADAY_SMA_PERIOD")
     intraday_ema_period: int = Field(50, validation_alias="INTRADAY_EMA_PERIOD")

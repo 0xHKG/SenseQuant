@@ -65,8 +65,8 @@ def compute_features(df: pd.DataFrame, settings: Settings) -> pd.DataFrame:
 
     # RSI (Relative Strength Index)
     delta = df["close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=settings.intraday_rsi_period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=settings.intraday_rsi_period).mean()
+    gain = (delta.where(delta > 0, 0)).rolling(window=settings.intraday_rsi_period).mean()  # type: ignore[operator]
+    loss = (-delta.where(delta < 0, 0)).rolling(window=settings.intraday_rsi_period).mean()  # type: ignore[operator]
     rs = gain / loss.replace(0, 1e-10)  # Avoid division by zero
     df["rsi14"] = 100 - (100 / (1 + rs))
 
@@ -79,10 +79,7 @@ def compute_features(df: pd.DataFrame, settings: Settings) -> pd.DataFrame:
 
     # Mark rows with valid indicators (non-NaN for all features)
     df["valid"] = (
-        df["sma20"].notna()
-        & df["ema50"].notna()
-        & df["rsi14"].notna()
-        & df["atr14"].notna()
+        df["sma20"].notna() & df["ema50"].notna() & df["rsi14"].notna() & df["atr14"].notna()
     )
 
     logger.debug(

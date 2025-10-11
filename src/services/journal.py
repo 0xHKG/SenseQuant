@@ -106,6 +106,61 @@ class TradeJournal:
         if self._file_handle:
             self._file_handle.flush()
 
+    def log(
+        self,
+        symbol: str,
+        action: str,
+        qty: int,
+        price: float,
+        pnl: float,
+        reason: str,
+        mode: str,
+        order_id: str,
+        status: str,
+        strategy: str = "",
+        meta_json: str = "",
+    ) -> None:
+        """
+        Append generic log entry to journal.
+
+        Args:
+            symbol: Stock symbol
+            action: Action (BUY/SELL/LONG/SHORT/FLAT)
+            qty: Quantity
+            price: Price
+            pnl: Profit/loss
+            reason: Reason for the action
+            mode: Trading mode (dryrun/live)
+            order_id: Order ID
+            status: Order status
+            strategy: Strategy name (optional)
+            meta_json: JSON metadata (optional)
+        """
+        self._rotate_if_needed()
+        assert self._writer is not None
+
+        ist = pytz.timezone("Asia/Kolkata")
+        now_ist = datetime.now(ist)
+
+        row = {
+            "timestamp_ist": now_ist.isoformat(),
+            "symbol": symbol,
+            "action": action,
+            "qty": qty,
+            "price": f"{price:.2f}" if price else "",
+            "pnl": f"{pnl:.2f}" if pnl else "",
+            "reason": reason,
+            "mode": mode,
+            "order_id": order_id,
+            "status": status,
+            "strategy": strategy,
+            "meta_json": meta_json,
+        }
+
+        self._writer.writerow(row)
+        if self._file_handle:
+            self._file_handle.flush()
+
     def close(self) -> None:
         """Close journal file."""
         if self._file_handle:
