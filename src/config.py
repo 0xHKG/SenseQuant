@@ -1,5 +1,5 @@
 from pydantic import BaseSettings, Field
-from typing import List, Optional
+from typing import List
 from dotenv import load_dotenv
 load_dotenv()
 

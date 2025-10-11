@@ -59,8 +59,6 @@ class BreezeClient:
             df = pd.DataFrame(resp if isinstance(resp, list) else resp.get("Success", []))
             if not df.empty:
                 # normalize column names
-                cols = {c.lower(): c for c in df.columns}
-                # ensure lower-case keys
                 df.columns = [c.lower() for c in df.columns]
                 # parse datetime
                 dt_col = "datetime" if "datetime" in df.columns else "time" if "time" in df.columns else None
