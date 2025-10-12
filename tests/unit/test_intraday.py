@@ -94,7 +94,7 @@ def test_compute_features_insufficient_data(
 
 def test_compute_features_missing_columns(settings: Settings) -> None:
     """Test compute_features raises ValueError for missing columns."""
-    df_missing = pd.DataFrame([{"open": 100.0, "close": 101.0}])  # Missing high, low
+    df_missing = pd.DataFrame([{"open": 100.0, "close": 101.0}])  # Missing high, low, volume
 
     with pytest.raises(ValueError, match="Missing required columns"):
         compute_features(df_missing, settings)

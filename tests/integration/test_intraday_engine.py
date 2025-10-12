@@ -24,20 +24,13 @@ def mock_breeze_client() -> MagicMock:
 
 
 @pytest.fixture
-def mock_sentiment() -> MagicMock:
-    """Create mock sentiment provider."""
-    sentiment_mock = MagicMock(return_value=0.0)
-    return sentiment_mock
-
-
-@pytest.fixture
 def sample_bars() -> list[Bar]:
     """Generate sample bars for testing."""
     ist = pytz.timezone("Asia/Kolkata")
     now = datetime.now(ist)
     bars = []
     for i in range(100):
-        ts = pd.Timestamp(now - timedelta(minutes=100 - i), tz=ist)
+        ts = pd.Timestamp(now - timedelta(minutes=100 - i))
         bars.append(
             Bar(
                 ts=ts,
@@ -53,118 +46,106 @@ def sample_bars() -> list[Bar]:
 
 def test_tick_intraday_within_window(
     mock_breeze_client: MagicMock,
-    mock_sentiment: MagicMock,
     sample_bars: list[Bar],
 ) -> None:
     """Test tick_intraday processes signal within trading window."""
     mock_breeze_client.historical_bars.return_value = sample_bars
 
     with patch("src.services.engine.BreezeClient", return_value=mock_breeze_client):
-        with patch("src.services.engine.get_sentiment", mock_sentiment):
-            # Mock current time to be within window (10:00 IST)
-            ist = pytz.timezone("Asia/Kolkata")
-            mock_time = datetime(2025, 10, 11, 10, 0, 0, tzinfo=ist)
-            with patch("src.services.engine.datetime") as mock_datetime:
-                mock_datetime.now.return_value = mock_time
+        # Mock current time to be within window (10:00 IST)
+        ist = pytz.timezone("Asia/Kolkata")
+        mock_time = datetime(2025, 10, 11, 10, 0, 0, tzinfo=ist)
+        with patch("src.services.engine.datetime") as mock_datetime:
+            mock_datetime.now.return_value = mock_time
 
-                engine = Engine(symbols=["RELIANCE"])
-                engine.start()
-                engine.tick_intraday("RELIANCE")
+            engine = Engine(symbols=["RELIANCE"])
+            engine.start()
+            engine.tick_intraday("RELIANCE")
 
-                # Verify historical_bars was called
-                assert mock_breeze_client.historical_bars.called
-                # Verify sentiment was fetched
-                assert mock_sentiment.called
+            # Verify historical_bars was called
+            assert mock_breeze_client.historical_bars.called
 
 
 def test_tick_intraday_outside_window_before(
     mock_breeze_client: MagicMock,
-    mock_sentiment: MagicMock,
 ) -> None:
     """Test tick_intraday skips processing before market open (9:15 IST)."""
     with patch("src.services.engine.BreezeClient", return_value=mock_breeze_client):
-        with patch("src.services.engine.get_sentiment", mock_sentiment):
-            # Mock current time to be before window (9:00 IST)
-            ist = pytz.timezone("Asia/Kolkata")
-            mock_time = datetime(2025, 10, 11, 9, 0, 0, tzinfo=ist)
-            with patch("src.services.engine.datetime") as mock_datetime:
-                mock_datetime.now.return_value = mock_time
+        # Mock current time to be before window (9:00 IST)
+        ist = pytz.timezone("Asia/Kolkata")
+        mock_time = datetime(2025, 10, 11, 9, 0, 0, tzinfo=ist)
+        with patch("src.services.engine.datetime") as mock_datetime:
+            mock_datetime.now.return_value = mock_time
 
-                engine = Engine(symbols=["RELIANCE"])
-                engine.start()
-                engine.tick_intraday("RELIANCE")
+            engine = Engine(symbols=["RELIANCE"])
+            engine.start()
+            engine.tick_intraday("RELIANCE")
 
-                # Verify historical_bars was NOT called (outside window)
-                assert not mock_breeze_client.historical_bars.called
+            # Verify historical_bars was NOT called (outside window)
+            assert not mock_breeze_client.historical_bars.called
 
 
 def test_tick_intraday_outside_window_after(
     mock_breeze_client: MagicMock,
-    mock_sentiment: MagicMock,
 ) -> None:
     """Test tick_intraday skips processing after market close (15:29 IST)."""
     with patch("src.services.engine.BreezeClient", return_value=mock_breeze_client):
-        with patch("src.services.engine.get_sentiment", mock_sentiment):
-            # Mock current time to be after window (15:35 IST)
-            ist = pytz.timezone("Asia/Kolkata")
-            mock_time = datetime(2025, 10, 11, 15, 35, 0, tzinfo=ist)
-            with patch("src.services.engine.datetime") as mock_datetime:
-                mock_datetime.now.return_value = mock_time
+        # Mock current time to be after window (15:35 IST)
+        ist = pytz.timezone("Asia/Kolkata")
+        mock_time = datetime(2025, 10, 11, 15, 35, 0, tzinfo=ist)
+        with patch("src.services.engine.datetime") as mock_datetime:
+            mock_datetime.now.return_value = mock_time
 
-                engine = Engine(symbols=["RELIANCE"])
-                engine.start()
-                engine.tick_intraday("RELIANCE")
+            engine = Engine(symbols=["RELIANCE"])
+            engine.start()
+            engine.tick_intraday("RELIANCE")
 
-                # Verify historical_bars was NOT called (outside window)
-                assert not mock_breeze_client.historical_bars.called
+            # Verify historical_bars was NOT called (outside window)
+            assert not mock_breeze_client.historical_bars.called
 
 
 def test_tick_intraday_at_start_edge(
     mock_breeze_client: MagicMock,
-    mock_sentiment: MagicMock,
     sample_bars: list[Bar],
 ) -> None:
     """Test tick_intraday processes at exactly 9:15 IST (start edge)."""
     mock_breeze_client.historical_bars.return_value = sample_bars
 
     with patch("src.services.engine.BreezeClient", return_value=mock_breeze_client):
-        with patch("src.services.engine.get_sentiment", mock_sentiment):
-            # Mock current time to be exactly at start (9:15 IST)
-            ist = pytz.timezone("Asia/Kolkata")
-            mock_time = datetime(2025, 10, 11, 9, 15, 0, tzinfo=ist)
-            with patch("src.services.engine.datetime") as mock_datetime:
-                mock_datetime.now.return_value = mock_time
+        # Mock current time to be exactly at start (9:15 IST)
+        ist = pytz.timezone("Asia/Kolkata")
+        mock_time = datetime(2025, 10, 11, 9, 15, 0, tzinfo=ist)
+        with patch("src.services.engine.datetime") as mock_datetime:
+            mock_datetime.now.return_value = mock_time
 
-                engine = Engine(symbols=["RELIANCE"])
-                engine.start()
-                engine.tick_intraday("RELIANCE")
+            engine = Engine(symbols=["RELIANCE"])
+            engine.start()
+            engine.tick_intraday("RELIANCE")
 
-                # Verify historical_bars WAS called (at start edge)
-                assert mock_breeze_client.historical_bars.called
+            # Verify historical_bars WAS called (at start edge)
+            assert mock_breeze_client.historical_bars.called
 
 
 def test_tick_intraday_at_end_edge(
     mock_breeze_client: MagicMock,
-    mock_sentiment: MagicMock,
     sample_bars: list[Bar],
 ) -> None:
     """Test tick_intraday processes at exactly 15:29 IST (end edge)."""
     mock_breeze_client.historical_bars.return_value = sample_bars
 
     with patch("src.services.engine.BreezeClient", return_value=mock_breeze_client):
-        with patch("src.services.engine.get_sentiment", mock_sentiment):
-            # Mock current time to be exactly at end (15:29 IST)
-            ist = pytz.timezone("Asia/Kolkata")
-            mock_time = datetime(2025, 10, 11, 15, 29, 0, tzinfo=ist)
-            with patch("src.services.engine.datetime") as mock_datetime:
-                mock_datetime.now.return_value = mock_time
+        # Mock current time to be exactly at end (15:29 IST)
+        ist = pytz.timezone("Asia/Kolkata")
+        mock_time = datetime(2025, 10, 11, 15, 29, 0, tzinfo=ist)
+        with patch("src.services.engine.datetime") as mock_datetime:
+            mock_datetime.now.return_value = mock_time
 
-                engine = Engine(symbols=["RELIANCE"])
-                engine.start()
-                engine.tick_intraday("RELIANCE")
+            engine = Engine(symbols=["RELIANCE"])
+            engine.start()
+            engine.tick_intraday("RELIANCE")
 
-                # Verify historical_bars WAS called (at end edge)
-                assert mock_breeze_client.historical_bars.called
+            # Verify historical_bars WAS called (at end edge)
+            assert mock_breeze_client.historical_bars.called
 
 
 def test_square_off_intraday_with_long_position(
@@ -175,13 +156,27 @@ def test_square_off_intraday_with_long_position(
         engine = Engine(symbols=["RELIANCE"])
         engine.start()
 
-        # Set up open long position
-        engine._open_positions["RELIANCE"] = 100  # 100 shares long
+        # Set up open long position using IntradayPosition
+        from src.domain.strategies.intraday import IntradayPosition
+
+        engine._intraday_positions["RELIANCE"] = IntradayPosition(
+            symbol="RELIANCE",
+            direction="LONG",
+            entry_price=100.0,
+            entry_time=pd.Timestamp("2025-10-11 10:00:00"),
+            qty=100,
+            entry_fees=15.0,
+        )
+
+        # Track position with risk manager
+        engine._risk_manager.update_position(
+            symbol="RELIANCE", qty=100, price=100.0, is_opening=True
+        )
 
         engine.square_off_intraday("RELIANCE")
 
-        # In dryrun mode, should not call place_order, but should log to journal
-        assert engine._open_positions["RELIANCE"] == 0
+        # Position should be cleared
+        assert "RELIANCE" not in engine._intraday_positions
 
 
 def test_square_off_intraday_with_short_position(
@@ -192,13 +187,27 @@ def test_square_off_intraday_with_short_position(
         engine = Engine(symbols=["RELIANCE"])
         engine.start()
 
-        # Set up open short position
-        engine._open_positions["RELIANCE"] = -50  # 50 shares short
+        # Set up open short position using IntradayPosition
+        from src.domain.strategies.intraday import IntradayPosition
+
+        engine._intraday_positions["RELIANCE"] = IntradayPosition(
+            symbol="RELIANCE",
+            direction="SHORT",
+            entry_price=100.0,
+            entry_time=pd.Timestamp("2025-10-11 10:00:00"),
+            qty=50,
+            entry_fees=7.5,
+        )
+
+        # Track position with risk manager
+        engine._risk_manager.update_position(
+            symbol="RELIANCE", qty=50, price=100.0, is_opening=True
+        )
 
         engine.square_off_intraday("RELIANCE")
 
         # Position should be cleared
-        assert engine._open_positions["RELIANCE"] == 0
+        assert "RELIANCE" not in engine._intraday_positions
 
 
 def test_square_off_intraday_no_position(
@@ -212,54 +221,50 @@ def test_square_off_intraday_no_position(
         # No position set
         engine.square_off_intraday("RELIANCE")
 
-        # Should not crash, position remains 0
-        assert engine._open_positions.get("RELIANCE", 0) == 0
+        # Should not crash, position remains empty
+        assert "RELIANCE" not in engine._intraday_positions
 
 
 def test_tick_intraday_handles_fetch_error(
     mock_breeze_client: MagicMock,
-    mock_sentiment: MagicMock,
 ) -> None:
     """Test tick_intraday handles historical_bars fetch error gracefully."""
     # Simulate fetch error
     mock_breeze_client.historical_bars.side_effect = Exception("Network error")
 
     with patch("src.services.engine.BreezeClient", return_value=mock_breeze_client):
-        with patch("src.services.engine.get_sentiment", mock_sentiment):
-            ist = pytz.timezone("Asia/Kolkata")
-            mock_time = datetime(2025, 10, 11, 10, 0, 0, tzinfo=ist)
-            with patch("src.services.engine.datetime") as mock_datetime:
-                mock_datetime.now.return_value = mock_time
+        ist = pytz.timezone("Asia/Kolkata")
+        mock_time = datetime(2025, 10, 11, 10, 0, 0, tzinfo=ist)
+        with patch("src.services.engine.datetime") as mock_datetime:
+            mock_datetime.now.return_value = mock_time
 
-                engine = Engine(symbols=["RELIANCE"])
-                engine.start()
+            engine = Engine(symbols=["RELIANCE"])
+            engine.start()
 
-                # Should not crash
-                engine.tick_intraday("RELIANCE")
+            # Should not crash
+            engine.tick_intraday("RELIANCE")
 
-                # Verify error was logged but execution continued
-                assert mock_breeze_client.historical_bars.called
+            # Verify error was logged but execution continued
+            assert mock_breeze_client.historical_bars.called
 
 
 def test_tick_intraday_handles_empty_bars(
     mock_breeze_client: MagicMock,
-    mock_sentiment: MagicMock,
 ) -> None:
     """Test tick_intraday handles empty bars gracefully."""
     mock_breeze_client.historical_bars.return_value = []
 
     with patch("src.services.engine.BreezeClient", return_value=mock_breeze_client):
-        with patch("src.services.engine.get_sentiment", mock_sentiment):
-            ist = pytz.timezone("Asia/Kolkata")
-            mock_time = datetime(2025, 10, 11, 10, 0, 0, tzinfo=ist)
-            with patch("src.services.engine.datetime") as mock_datetime:
-                mock_datetime.now.return_value = mock_time
+        ist = pytz.timezone("Asia/Kolkata")
+        mock_time = datetime(2025, 10, 11, 10, 0, 0, tzinfo=ist)
+        with patch("src.services.engine.datetime") as mock_datetime:
+            mock_datetime.now.return_value = mock_time
 
-                engine = Engine(symbols=["RELIANCE"])
-                engine.start()
+            engine = Engine(symbols=["RELIANCE"])
+            engine.start()
 
-                # Should not crash
-                engine.tick_intraday("RELIANCE")
+            # Should not crash
+            engine.tick_intraday("RELIANCE")
 
-                # Verify bars were fetched but processing stopped gracefully
-                assert mock_breeze_client.historical_bars.called
+            # Verify bars were fetched but processing stopped gracefully
+            assert mock_breeze_client.historical_bars.called

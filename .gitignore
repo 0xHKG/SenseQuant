@@ -1,3 +1,15 @@
 .env
 .env.*
-.env.example
+.env.example__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.coverage
+htmlcov/
+logs/
+data/
+examples/
+minimal_two_agent_relay/
+release/audit_*/
+release/manifests/

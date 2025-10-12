@@ -1,0 +1,9 @@
+{
+  "rsi_period": [10, 14, 20],
+  "rsi_oversold": [25, 30, 35],
+  "rsi_overbought": [65, 70, 75],
+  "sma_short": [10, 15, 20],
+  "sma_long": [40, 50, 60],
+  "sentiment_threshold": [0.15, 0.20, 0.25],
+  "confidence_min": [0.55, 0.60, 0.65]
+}

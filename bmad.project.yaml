@@ -1,0 +1,28 @@
+project:
+  name: SenseQuant
+  description: Intraday & swing (NSE/BSE) with Breeze, sentiment, teacher–student
+  root: .
+  primary_ide: "Claude Code"
+
+artifacts:
+  prd: "docs/prd.md"
+  architecture: "docs/architecture.md"
+  stories_dir: "docs/stories"
+
+agents:
+  # we are using Claude/ChatGPT, but BMAD coordinates the prompts
+  - name: Analyst
+  - name: Architect
+  - name: ScrumMaster
+  - name: Developer
+  - name: QA
+
+quality_gates:
+  - "ruff check ."
+  - "mypy src"
+  - "pytest -q"
+
+modes:
+  - dryrun
+  - live
+  - backtest

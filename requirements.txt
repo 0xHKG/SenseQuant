@@ -1,0 +1,10 @@
+numpy>=1.26
+pandas>=2.2
+pydantic>=2.7
+pydantic-settings>=2.11
+python-dotenv>=1.0
+loguru>=0.7
+tenacity>=8.2
+pytz>=2024.1
+ta==0.11.0
+breeze-connect>=1.0.64

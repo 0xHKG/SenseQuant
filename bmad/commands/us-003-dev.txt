@@ -1,0 +1,9 @@
+[ROLE: Developer]  (Use with Claude Code — attach the files listed)
+Implement US-003 — Swing Strategy v1 exactly as per story.
+Files: src/domain/strategies/swing.py, src/services/engine.py, src/app/config.py, tests/unit/test_swing.py, tests/integration/test_swing_engine.py
+Gates to run & paste:
+python -m ruff check .
+python -m ruff format --check .
+python -m mypy src
+python -m pytest -q
+

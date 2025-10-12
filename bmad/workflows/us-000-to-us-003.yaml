@@ -1,0 +1,74 @@
+name: Sprint-S1-US000-003
+description: Run SM→Dev→QA for US-000..US-003 with Claude Code using BMAD prompts
+steps:
+  - id: sm-us000
+    role: ScrumMaster
+    files: ["docs/prd.md","docs/architecture.md","docs/stories/us-000-hardening.md"]
+    prompt: |
+      Expand US-000 with concrete file-level tasks & ACs (keep conda/pip). Save in-place.
+
+  - id: dev-us000
+    role: Developer
+    files: ["docs/stories/us-000-hardening.md","pyproject.toml","Makefile","src/**","tests/**"]
+    prompt: |
+      Implement US-000 exactly. Produce diffs/full files. Ensure ruff/mypy/pytest pass.
+
+  - id: qa-us000
+    role: QA
+    files: ["docs/stories/us-000-hardening.md","src/**","tests/**"]
+    prompt: |
+      Verify US-000 ACs; run ruff/mypy/pytest and report PASS/defects.
+
+  - id: sm-us001
+    role: ScrumMaster
+    files: ["docs/stories/us-001-breeze-adapter.md","docs/architecture.md"]
+    prompt: |
+      Expand US-001 (error taxonomy, retries, DRYRUN IDs, normalization, tests). Save in-place.
+
+  - id: dev-us001
+    role: Developer
+    files: ["docs/stories/us-001-breeze-adapter.md","src/adapters/breeze_client.py","src/domain/types.py","tests/**"]
+    prompt: |
+      Implement US-001 exactly; add tests; ruff/mypy/pytest must pass.
+
+  - id: qa-us001
+    role: QA
+    files: ["docs/stories/us-001-breeze-adapter.md","src/**","tests/**"]
+    prompt: |
+      Verify US-001 ACs; report PASS/defects.
+
+  - id: sm-us002
+    role: ScrumMaster
+    files: ["docs/stories/us-002-intraday.md","docs/prd.md","docs/architecture.md"]
+    prompt: |
+      Confirm US-002 scope/ACs; save updated story if needed.
+
+  - id: dev-us002
+    role: Developer
+    files: ["docs/stories/us-002-intraday.md","src/domain/strategies/intraday.py","src/services/engine.py","src/app/config.py","tests/**"]
+    prompt: |
+      Implement US-002; add unit+integration tests; ruff/mypy/pytest must pass.
+
+  - id: qa-us002
+    role: QA
+    files: ["docs/stories/us-002-intraday.md","src/**","tests/**"]
+    prompt: |
+      Verify US-002 ACs; report PASS/defects.
+
+  - id: sm-us003
+    role: ScrumMaster
+    files: ["docs/stories/us-003-swing.md","docs/prd.md","docs/architecture.md"]
+    prompt: |
+      Confirm US-003 ready; save updated story if needed.
+
+  - id: dev-us003
+    role: Developer
+    files: ["docs/stories/us-003-swing.md","src/domain/strategies/swing.py","src/services/engine.py","src/app/config.py","tests/**"]
+    prompt: |
+      Implement US-003; add tests; ruff/mypy/pytest must pass.
+
+  - id: qa-us003
+    role: QA
+    files: ["docs/stories/us-003-swing.md","src/**","tests/**"]
+    prompt: |
+      Verify US-003 ACs; report PASS/defects.

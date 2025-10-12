@@ -1,48 +1,471 @@
-"""Swing trading strategy."""
+"""Swing trading strategy with SMA crossover and position management."""
 
 from __future__ import annotations
 
-import pandas as pd
+from dataclasses import dataclass
+from typing import Literal
 
+import pandas as pd
+from loguru import logger
+
+from src.app.config import Settings
+from src.domain.features import (
+    calculate_adx,
+    calculate_atr,
+    calculate_ema,
+    calculate_obv,
+    calculate_rsi,
+    calculate_sma,
+)
 from src.domain.types import Signal, SignalDirection
 
 
-class SwingStrategy:
-    """Simple baseline swing strategy with sentiment filter."""
+@dataclass
+class SwingPosition:
+    """Swing position state for tracking open trades."""
 
-    def signal(self, df_daily: pd.DataFrame, sentiment_score: float = 0.0) -> Signal | None:
-        """
-        Generate swing trading signal from daily bars.
+    symbol: str
+    direction: Literal["LONG", "SHORT"]
+    entry_price: float
+    entry_date: pd.Timestamp
+    qty: int
+    entry_fees: float = 0.0
+    exit_fees: float = 0.0
+    realized_pnl: float = 0.0
 
-        Simple logic: 10/30 SMA cross with sentiment filter.
+    def days_held(self, current_date: pd.Timestamp) -> int:
+        """Calculate days held (business days approximation)."""
+        return (current_date - self.entry_date).days
 
-        Args:
-            df_daily: DataFrame with 'close' column
-            sentiment_score: Sentiment score in [-1, 1]
 
-        Returns:
-            Signal or None if no signal
-        """
-        if df_daily is None or df_daily.empty or "close" not in df_daily.columns:
-            return None
+def compute_features(df: pd.DataFrame, settings: Settings) -> pd.DataFrame:
+    """
+    Compute technical indicators for swing strategy (daily bars).
 
-        s = df_daily["close"].tail(90)
-        if len(s) < 30:
-            return None
+    Adds columns: sma_fast, sma_slow, rsi, ema20, atr14, adx14, obv, valid.
+    If insufficient data, sets valid=False for all rows.
 
-        sma10 = s.rolling(10).mean().iloc[-1]
-        sma30 = s.rolling(30).mean().iloc[-1]
+    Args:
+        df: DataFrame with OHLC columns (open, high, low, close, volume)
+            Expected daily frequency with tz-aware timestamps
+        settings: Application settings with indicator periods
 
-        direction: SignalDirection
-        if sma10 > sma30 and sentiment_score >= -0.2:
-            direction = "LONG"
-            return Signal(
-                symbol="", direction=direction, strength=0.6, meta={"sma10": sma10, "sma30": sma30}
+    Returns:
+        DataFrame with additional feature columns
+
+    Raises:
+        ValueError: If required OHLC columns are missing
+    """
+    required_cols = ["open", "high", "low", "close", "volume", "ts"]
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    df = df.copy()
+    df = df.sort_values("ts")  # Ensure chronological order
+
+    # Check if we have enough data for the longest period indicator
+    min_required = max(
+        settings.swing_sma_fast,
+        settings.swing_sma_slow,
+        settings.swing_rsi_period,
+    )
+
+    if len(df) < min_required:
+        logger.warning(
+            "Insufficient data for swing features",
+            extra={
+                "component": "swing",
+                "rows": len(df),
+                "required": min_required,
+            },
+        )
+        df["sma_fast"] = None
+        df["sma_slow"] = None
+        df["rsi"] = None
+        df["ema20"] = None
+        df["atr14"] = None
+        df["adx14"] = None
+        df["obv"] = None
+        df["valid"] = False
+        return df
+
+    # Calculate indicators using feature library
+    df["sma_fast"] = calculate_sma(df["close"], period=settings.swing_sma_fast)
+    df["sma_slow"] = calculate_sma(df["close"], period=settings.swing_sma_slow)
+    df["rsi"] = calculate_rsi(df["close"], period=settings.swing_rsi_period)
+    df["ema20"] = calculate_ema(df["close"], period=20)
+    df["atr14"] = calculate_atr(df["high"], df["low"], df["close"], period=14)
+    df["adx14"] = calculate_adx(df["high"], df["low"], df["close"], period=14)
+    df["obv"] = calculate_obv(df["close"], df["volume"])
+
+    # Mark rows with valid indicators (non-NaN for core features)
+    df["valid"] = df["sma_fast"].notna() & df["sma_slow"].notna() & df["rsi"].notna()
+
+    logger.debug(
+        "Swing features computed",
+        extra={
+            "component": "swing",
+            "rows": len(df),
+            "valid_rows": df["valid"].sum(),
+        },
+    )
+
+    return df
+
+
+def signal(
+    df: pd.DataFrame,
+    settings: Settings,
+    *,
+    position: SwingPosition | None = None,
+    sentiment_score: float = 0.0,
+    sentiment_meta: dict[str, bool | float | str] | None = None,
+) -> Signal:
+    """
+    Generate swing trading signal from feature DataFrame with sentiment gating.
+
+    Entry Logic (no open position):
+    - LONG if sma_fast crosses ABOVE sma_slow today (yesterday: fast <= slow, today: fast > slow)
+      - Suppressed if sentiment < sentiment_gate_threshold
+      - Confidence boosted if sentiment > sentiment_boost_threshold
+    - SHORT if sma_fast crosses BELOW sma_slow today (yesterday: fast >= slow, today: fast < slow)
+      - Suppressed if sentiment > -sentiment_gate_threshold
+      - Confidence boosted if sentiment < -sentiment_boost_threshold
+    - Otherwise FLAT
+
+    Exit Logic (open position):
+    - Check gap at open: if open price triggers SL/TP → exit at open ("gap_exit")
+    - Check close price: SL/TP/max_hold → exit at close
+    - Returns exit signal with FLAT direction
+
+    Args:
+        df: DataFrame with computed features (from compute_features)
+        settings: Application settings with thresholds
+        position: Current open position (None if no position)
+        sentiment_score: Sentiment score [-1.0, 1.0] (default: 0.0 = neutral)
+        sentiment_meta: Metadata from sentiment cache (provider, cache_hit, etc.)
+
+    Returns:
+        Signal with direction LONG/SHORT/FLAT, strength, and meta with reason
+    """
+    if sentiment_meta is None:
+        sentiment_meta = {}
+    required_features = ["ts", "open", "close", "sma_fast", "sma_slow", "valid"]
+    missing = [c for c in required_features if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required feature columns: {missing}")
+
+    # Filter to valid rows only
+    valid_df = df[df["valid"]]
+    if valid_df.empty:
+        logger.warning(
+            "No valid feature rows for swing signal",
+            extra={"component": "swing"},
+        )
+        return Signal(
+            symbol="",
+            direction="FLAT",
+            strength=0.0,
+            meta={"reason": "insufficient", "strategy": "swing"},
+        )
+
+    if len(valid_df) < 2:
+        return Signal(
+            symbol="",
+            direction="FLAT",
+            strength=0.0,
+            meta={"reason": "insufficient", "strategy": "swing"},
+        )
+
+    # Get today (last row) and yesterday (second-to-last row)
+    today = valid_df.iloc[-1]
+    yesterday = valid_df.iloc[-2]
+
+    today_date = pd.Timestamp(today["ts"])
+    today_open = float(today["open"])
+    today_close = float(today["close"])
+    sma_fast_today = float(today["sma_fast"])
+    sma_slow_today = float(today["sma_slow"])
+    sma_fast_yesterday = float(yesterday["sma_fast"])
+    sma_slow_yesterday = float(yesterday["sma_slow"])
+
+    # === EXIT LOGIC (if position exists) ===
+    if position is not None:
+        days_held = position.days_held(today_date)
+
+        # Check gap exit at open
+        if position.direction == "LONG":
+            pnl_open = (today_open - position.entry_price) / position.entry_price
+            pnl_close = (today_close - position.entry_price) / position.entry_price
+
+            # Gap down to SL at open
+            if pnl_open <= -settings.swing_sl_pct:
+                return Signal(
+                    symbol=position.symbol,
+                    direction="FLAT",
+                    strength=1.0,
+                    meta={
+                        "reason": "gap_exit_sl",
+                        "strategy": "swing",
+                        "exit_price": today_open,
+                        "pnl": pnl_open,
+                        "days_held": days_held,
+                    },
+                )
+            # Gap up to TP at open
+            if pnl_open >= settings.swing_tp_pct:
+                return Signal(
+                    symbol=position.symbol,
+                    direction="FLAT",
+                    strength=1.0,
+                    meta={
+                        "reason": "gap_exit_tp",
+                        "strategy": "swing",
+                        "exit_price": today_open,
+                        "pnl": pnl_open,
+                        "days_held": days_held,
+                    },
+                )
+
+            # Check SL/TP at close
+            if pnl_close <= -settings.swing_sl_pct:
+                return Signal(
+                    symbol=position.symbol,
+                    direction="FLAT",
+                    strength=1.0,
+                    meta={
+                        "reason": "sl_hit",
+                        "strategy": "swing",
+                        "exit_price": today_close,
+                        "pnl": pnl_close,
+                        "days_held": days_held,
+                    },
+                )
+            if pnl_close >= settings.swing_tp_pct:
+                return Signal(
+                    symbol=position.symbol,
+                    direction="FLAT",
+                    strength=1.0,
+                    meta={
+                        "reason": "tp_hit",
+                        "strategy": "swing",
+                        "exit_price": today_close,
+                        "pnl": pnl_close,
+                        "days_held": days_held,
+                    },
+                )
+
+        elif position.direction == "SHORT":
+            pnl_open = (position.entry_price - today_open) / position.entry_price
+            pnl_close = (position.entry_price - today_close) / position.entry_price
+
+            # Gap up to SL at open (short loses when price rises)
+            if pnl_open <= -settings.swing_sl_pct:
+                return Signal(
+                    symbol=position.symbol,
+                    direction="FLAT",
+                    strength=1.0,
+                    meta={
+                        "reason": "gap_exit_sl",
+                        "strategy": "swing",
+                        "exit_price": today_open,
+                        "pnl": pnl_open,
+                        "days_held": days_held,
+                    },
+                )
+            # Gap down to TP at open (short wins when price falls)
+            if pnl_open >= settings.swing_tp_pct:
+                return Signal(
+                    symbol=position.symbol,
+                    direction="FLAT",
+                    strength=1.0,
+                    meta={
+                        "reason": "gap_exit_tp",
+                        "strategy": "swing",
+                        "exit_price": today_open,
+                        "pnl": pnl_open,
+                        "days_held": days_held,
+                    },
+                )
+
+            # Check SL/TP at close
+            if pnl_close <= -settings.swing_sl_pct:
+                return Signal(
+                    symbol=position.symbol,
+                    direction="FLAT",
+                    strength=1.0,
+                    meta={
+                        "reason": "sl_hit",
+                        "strategy": "swing",
+                        "exit_price": today_close,
+                        "pnl": pnl_close,
+                        "days_held": days_held,
+                    },
+                )
+            if pnl_close >= settings.swing_tp_pct:
+                return Signal(
+                    symbol=position.symbol,
+                    direction="FLAT",
+                    strength=1.0,
+                    meta={
+                        "reason": "tp_hit",
+                        "strategy": "swing",
+                        "exit_price": today_close,
+                        "pnl": pnl_close,
+                        "days_held": days_held,
+                    },
+                )
+
+        # Check max hold
+        if days_held >= settings.swing_max_hold_days:
+            pnl = (
+                (today_close - position.entry_price) / position.entry_price
+                if position.direction == "LONG"
+                else (position.entry_price - today_close) / position.entry_price
             )
-        if sma10 < sma30 and sentiment_score <= 0.2:
-            direction = "SHORT"
             return Signal(
-                symbol="", direction=direction, strength=0.6, meta={"sma10": sma10, "sma30": sma30}
+                symbol=position.symbol,
+                direction="FLAT",
+                strength=1.0,
+                meta={
+                    "reason": "max_hold",
+                    "strategy": "swing",
+                    "exit_price": today_close,
+                    "pnl": pnl,
+                    "days_held": days_held,
+                },
             )
 
-        return None
+        # Hold position (no exit signal)
+        return Signal(
+            symbol=position.symbol,
+            direction="FLAT",
+            strength=0.0,
+            meta={
+                "reason": "hold",
+                "strategy": "swing",
+                "days_held": days_held,
+            },
+        )
+
+    # === ENTRY LOGIC (no position) ===
+    direction: SignalDirection = "FLAT"
+    reason = "noop"
+    strength = 0.0
+
+    # Bullish crossover: fast crosses above slow
+    if sma_fast_yesterday <= sma_slow_yesterday and sma_fast_today > sma_slow_today:
+        # SENTIMENT GATING
+        if sentiment_score < settings.sentiment_gate_threshold:
+            logger.info(
+                "Bullish signal suppressed by negative sentiment",
+                extra={
+                    "component": "swing",
+                    "sentiment": sentiment_score,
+                    "threshold": settings.sentiment_gate_threshold,
+                },
+            )
+            return Signal(
+                symbol="",
+                direction="FLAT",
+                strength=0.0,
+                meta={
+                    "reason": "sentiment_gate",
+                    "strategy": "swing",
+                    "sentiment": sentiment_score,
+                    "sentiment_source": sentiment_meta.get("provider", "unknown"),
+                },
+            )
+
+        direction = "LONG"
+        reason = "bull_cross"
+        strength = 0.8
+
+        # SENTIMENT BOOSTING
+        if sentiment_score > settings.sentiment_boost_threshold:
+            original_strength = strength
+            strength *= settings.sentiment_boost_multiplier
+            logger.info(
+                "Bullish signal boosted by positive sentiment",
+                extra={
+                    "component": "swing",
+                    "sentiment": sentiment_score,
+                    "original_strength": original_strength,
+                    "boosted_strength": strength,
+                },
+            )
+
+        logger.info(
+            "Bullish crossover detected",
+            extra={
+                "component": "swing",
+                "sma_fast": sma_fast_today,
+                "sma_slow": sma_slow_today,
+                "sentiment": sentiment_score,
+            },
+        )
+
+    # Bearish crossunder: fast crosses below slow
+    elif sma_fast_yesterday >= sma_slow_yesterday and sma_fast_today < sma_slow_today:
+        # SENTIMENT GATING (inverse for SHORT)
+        if sentiment_score > -settings.sentiment_gate_threshold:
+            logger.info(
+                "Bearish signal suppressed by positive sentiment",
+                extra={
+                    "component": "swing",
+                    "sentiment": sentiment_score,
+                    "threshold": -settings.sentiment_gate_threshold,
+                },
+            )
+            return Signal(
+                symbol="",
+                direction="FLAT",
+                strength=0.0,
+                meta={
+                    "reason": "sentiment_gate",
+                    "strategy": "swing",
+                    "sentiment": sentiment_score,
+                    "sentiment_source": sentiment_meta.get("provider", "unknown"),
+                },
+            )
+
+        direction = "SHORT"
+        reason = "bear_cross"
+        strength = 0.8
+
+        # SENTIMENT BOOSTING (inverse for SHORT)
+        if sentiment_score < -settings.sentiment_boost_threshold:
+            original_strength = strength
+            strength *= settings.sentiment_boost_multiplier
+            logger.info(
+                "Bearish signal boosted by negative sentiment",
+                extra={
+                    "component": "swing",
+                    "sentiment": sentiment_score,
+                    "original_strength": original_strength,
+                    "boosted_strength": strength,
+                },
+            )
+
+        logger.info(
+            "Bearish crossunder detected",
+            extra={
+                "component": "swing",
+                "sma_fast": sma_fast_today,
+                "sma_slow": sma_slow_today,
+                "sentiment": sentiment_score,
+            },
+        )
+
+    meta = {
+        "reason": reason,
+        "strategy": "swing",
+        "sma_fast": sma_fast_today,
+        "sma_slow": sma_slow_today,
+        "close": today_close,
+        "sentiment": sentiment_score,
+        "sentiment_source": sentiment_meta.get("provider", "unknown"),
+    }
+
+    return Signal(symbol="", direction=direction, strength=strength, meta=meta)

@@ -51,7 +51,7 @@ ignore_missing_imports = true
 testpaths = ["tests"]
 python_files = "test_*.py"
 python_functions = "test_*"
-addopts = "-v --cov=src --cov-report=term-missing "
+addopts = "-v"
 
 [[tool.mypy.overrides]]
 module = "pydantic_settings.*"

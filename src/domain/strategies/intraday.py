@@ -2,18 +2,45 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Literal
+
 import pandas as pd
 from loguru import logger
 
 from src.app.config import Settings
+from src.domain.features import (
+    calculate_atr,
+    calculate_bollinger_bands,
+    calculate_ema,
+    calculate_macd,
+    calculate_rsi,
+    calculate_sma,
+    calculate_vwap,
+)
 from src.domain.types import Signal, SignalDirection
+
+
+@dataclass
+class IntradayPosition:
+    """Intraday position with fee tracking."""
+
+    symbol: str
+    direction: Literal["LONG", "SHORT"]
+    entry_price: float
+    entry_time: pd.Timestamp
+    qty: int
+    entry_fees: float = 0.0
+    exit_fees: float = 0.0
+    realized_pnl: float = 0.0
 
 
 def compute_features(df: pd.DataFrame, settings: Settings) -> pd.DataFrame:
     """
     Compute technical indicators for intraday strategy.
 
-    Adds columns: sma20, ema50, rsi14, atr14, valid.
+    Adds columns: sma20, ema50, rsi14, atr14, vwap, bb_upper, bb_middle, bb_lower,
+    macd_line, macd_signal, macd_histogram, valid.
     If insufficient data, sets valid=False for all rows.
 
     Args:
@@ -26,7 +53,7 @@ def compute_features(df: pd.DataFrame, settings: Settings) -> pd.DataFrame:
     Raises:
         ValueError: If required OHLC columns are missing
     """
-    required_cols = ["open", "high", "low", "close"]
+    required_cols = ["open", "high", "low", "close", "volume"]
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns: {missing}")
@@ -54,30 +81,40 @@ def compute_features(df: pd.DataFrame, settings: Settings) -> pd.DataFrame:
         df["ema50"] = None
         df["rsi14"] = None
         df["atr14"] = None
+        df["vwap"] = None
+        df["bb_upper"] = None
+        df["bb_middle"] = None
+        df["bb_lower"] = None
+        df["macd_line"] = None
+        df["macd_signal"] = None
+        df["macd_histogram"] = None
         df["valid"] = False
         return df
 
-    # Simple Moving Average
-    df["sma20"] = df["close"].rolling(window=settings.intraday_sma_period).mean()
+    # Calculate indicators using feature library
+    df["sma20"] = calculate_sma(df["close"], period=settings.intraday_sma_period)
+    df["ema50"] = calculate_ema(df["close"], period=settings.intraday_ema_period)
+    df["rsi14"] = calculate_rsi(df["close"], period=settings.intraday_rsi_period)
+    df["atr14"] = calculate_atr(
+        df["high"], df["low"], df["close"], period=settings.intraday_atr_period
+    )
+    df["vwap"] = calculate_vwap(df["high"], df["low"], df["close"], df["volume"])
 
-    # Exponential Moving Average
-    df["ema50"] = df["close"].ewm(span=settings.intraday_ema_period, adjust=False).mean()
+    # Bollinger Bands
+    bb_upper, bb_middle, bb_lower = calculate_bollinger_bands(df["close"], period=20, num_std=2.0)
+    df["bb_upper"] = bb_upper
+    df["bb_middle"] = bb_middle
+    df["bb_lower"] = bb_lower
 
-    # RSI (Relative Strength Index)
-    delta = df["close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=settings.intraday_rsi_period).mean()  # type: ignore[operator]
-    loss = (-delta.where(delta < 0, 0)).rolling(window=settings.intraday_rsi_period).mean()  # type: ignore[operator]
-    rs = gain / loss.replace(0, 1e-10)  # Avoid division by zero
-    df["rsi14"] = 100 - (100 / (1 + rs))
+    # MACD
+    macd_line, macd_signal, macd_histogram = calculate_macd(
+        df["close"], fast_period=12, slow_period=26, signal_period=9
+    )
+    df["macd_line"] = macd_line
+    df["macd_signal"] = macd_signal
+    df["macd_histogram"] = macd_histogram
 
-    # ATR (Average True Range)
-    high_low = df["high"] - df["low"]
-    high_close = (df["high"] - df["close"].shift()).abs()
-    low_close = (df["low"] - df["close"].shift()).abs()
-    true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
-    df["atr14"] = true_range.rolling(window=settings.intraday_atr_period).mean()
-
-    # Mark rows with valid indicators (non-NaN for all features)
+    # Mark rows with valid indicators (non-NaN for core features)
     df["valid"] = (
         df["sma20"].notna() & df["ema50"].notna() & df["rsi14"].notna() & df["atr14"].notna()
     )
