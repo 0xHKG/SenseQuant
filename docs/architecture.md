@@ -4584,3 +4584,1526 @@ jupyter notebook accuracy_report.ipynb
 - [US-017 Telemetry](stories/us-017-accuracy-audit.md) - Telemetry system
 - [US-019 Optimization](stories/us-019-optimization.md) - Parameter optimization
 - [US-021 Model Promotion](stories/us-021-model-promotion.md) - Student model lifecycle
+
+---
+
+## 10. Release Deployment Automation & Post-Deploy Monitoring (US-023)
+
+### Overview
+
+The Release Deployment Automation system provides end-to-end automation for production releases
+with built-in safety checks, artifact integrity verification, and heightened monitoring for the
+first 48 hours post-deployment. It builds on the Release Audit system (US-022) by adding:
+
+- Automated manifest generation with SHA256 hashes for all artifacts
+- Timestamped backups for atomic rollback
+- Heightened monitoring (5% thresholds, 6h windows) for first 48 hours
+- Automated rollback procedures with verification steps
+- Dashboard integration for release visibility
+
+### Release Workflow
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│ 1. AUDIT & VALIDATION                                                    │
+│    make release-audit                                                    │
+│    → Generates audit bundle in release/audit_<timestamp>/               │
+│    → Consolidates telemetry, optimization, student model metrics        │
+│    → Risk assessment and manual approval gates                          │
+└──────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌──────────────────────────────────────────────────────────────────────────┐
+│ 2. MANIFEST GENERATION                                                   │
+│    make release-manifest                                                 │
+│    → Scans artifacts: src/app/config.py, data/models/*, notebooks/*.ipynb│
+│    → Computes SHA256 hashes for integrity verification                  │
+│    → Creates timestamped backups in release/backups/<release_id>/       │
+│    → Loads approval records from audit bundle                           │
+│    → Generates rollback plan from previous manifest                     │
+│    → Writes release/manifests/<release_id>.yaml                         │
+└──────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌──────────────────────────────────────────────────────────────────────────┐
+│ 3. DEPLOYMENT (WITH CONFIRMATION)                                        │
+│    make release-deploy                                                   │
+│    → Prompts for confirmation: "Are you sure? (type 'yes')"             │
+│    → Registers release with MonitoringService                           │
+│    → Activates heightened monitoring (48h)                              │
+│    → Updates dashboard with active release info                         │
+│    → Logs deployment timestamp and deployer identity                    │
+└──────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌──────────────────────────────────────────────────────────────────────────┐
+│ 4. HEIGHTENED MONITORING (0-48h POST-DEPLOY)                            │
+│    MonitoringService automatically applies:                              │
+│    - Alert thresholds: 5% (vs normal 10%)                               │
+│    - Intraday window: 6 hours (vs normal 24h)                           │
+│    - Swing window: 24 hours (vs normal 90 days)                         │
+│    - Auto-transition to normal monitoring after 48h                     │
+│    → Dashboard shows: "🟡 Heightened" + time remaining                  │
+└──────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌──────────────────────────────────────────────────────────────────────────┐
+│ 5. NORMAL MONITORING (48h+ POST-DEPLOY)                                 │
+│    MonitoringService auto-transitions to standard thresholds:            │
+│    - Alert thresholds: 10%                                              │
+│    - Intraday window: 24 hours                                          │
+│    - Swing window: 90 days                                              │
+│    → Dashboard shows: "🟢 Normal"                                       │
+└──────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌──────────────────────────────────────────────────────────────────────────┐
+│ 6. ROLLBACK (IF NEEDED)                                                 │
+│    make release-rollback                                                 │
+│    → Prompts for confirmation                                           │
+│    → Loads previous manifest                                            │
+│    → Executes restore commands (cp backups → production paths)          │
+│    → Runs verification: release_audit.py --skip-validation, make test   │
+│    → Logs rollback event with reason                                    │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+### Release Manifest Schema
+
+**File:** `release/manifests/<release_id>.yaml`
+
+```yaml
+release_id: release_20251012_190000
+release_type: minor  # major | minor | hotfix
+audit_bundle: release/audit_20251012_183000
+
+deployment:
+  timestamp: 2025-10-12T19:00:00+05:30
+  deployer: engineering_lead
+  environment: production
+
+approvals:
+  - role: Engineering Lead
+    name: John Doe
+    email: john.doe@example.com
+    timestamp: 2025-10-12T18:45:00+05:30
+    signature: sha256:abc123def456...
+
+artifacts:
+  configs:
+    - path: src/app/config.py
+      hash: sha256:1a2b3c4d5e6f...
+      backup: release/backups/release_20251012_190000/config.py
+    - path: search_space.yaml
+      hash: sha256:9i8j7k6l5m4n...
+      backup: release/backups/release_20251012_190000/search_space.yaml
+
+  models:
+    - path: data/models/student_model.pkl
+      hash: sha256:9o0p1q2r3s4t...
+      version: v1.0_20251010
+      backup: release/backups/release_20251012_190000/student_model.pkl
+
+  notebooks:
+    - path: notebooks/accuracy_report.ipynb
+      hash: sha256:5u6v7w8x9y0z...
+      backup: release/backups/release_20251012_190000/accuracy_report.ipynb
+
+rollback_plan:
+  previous_release_id: release_20251005_180000
+  previous_manifest: release/manifests/release_20251005_180000.yaml
+  restore_commands:
+    - "cp release/backups/release_20251005_180000/config.py src/app/config.py"
+    - "cp release/backups/release_20251005_180000/student_model.pkl data/models/student_model.pkl"
+  verification_steps:
+    - "python scripts/release_audit.py --skip-validation"
+    - "make test"
+
+monitoring:
+  heightened_period_hours: 48
+  heightened_start: 2025-10-12T19:00:00+05:30
+  heightened_end: 2025-10-14T19:00:00+05:30
+  alert_thresholds:
+    intraday_hit_ratio_drop: 0.05  # 5% in heightened mode
+    swing_precision_drop: 0.05     # 5% in heightened mode
+  alert_frequency_hours: 2
+
+metadata:
+  generator: generate_manifest.py
+  generator_version: 1.0.0
+```
+
+### Makefile Targets
+
+#### `make release-audit`
+Generates audit bundle with quality assurance metrics.
+
+```bash
+make release-audit
+# → python scripts/release_audit.py
+# → Creates release/audit_<timestamp>/
+```
+
+#### `make release-validate`
+Runs promotion checklist and quality gates.
+
+```bash
+make release-validate
+# → Runs: make test (ruff, mypy, pytest)
+# → Verifies all tests pass before proceeding
+```
+
+#### `make release-manifest`
+Generates signed release manifest with artifact hashes.
+
+```bash
+make release-manifest
+# → Runs: release-validate first
+# → python scripts/generate_manifest.py
+# → Creates: release/manifests/<release_id>.yaml
+# → Creates: release/backups/<release_id>/
+```
+
+#### `make release-deploy`
+Deploys to production with confirmation prompt.
+
+```bash
+make release-deploy
+# → Runs: release-manifest first
+# → Prompts: "Are you sure you want to continue? (type 'yes'): "
+# → Registers release with MonitoringService
+# → Activates heightened monitoring
+```
+
+#### `make release-rollback`
+Rolls back to previous release.
+
+```bash
+make release-rollback
+# → Prompts: "Are you sure you want to rollback? (type 'yes'): "
+# → Loads previous manifest
+# → Executes restore commands
+# → Runs verification steps
+```
+
+#### `make release-status`
+Shows current release status.
+
+```bash
+make release-status
+# → Displays: data/monitoring/releases/active_release.yaml
+# → Shows: release_id, deployment timestamp, monitoring mode
+```
+
+### MonitoringService Extensions
+
+#### Release Tracking
+
+**File:** `src/services/monitoring.py`
+
+```python
+class MonitoringService:
+    def __init_release_tracking__(self) -> None:
+        """Initialize release tracking (US-023)."""
+        self.releases_dir = Path("data/monitoring/releases")
+        self.releases_dir.mkdir(parents=True, exist_ok=True)
+        self.active_release_info: dict[str, Any] | None = None
+        self._load_active_release()
+
+    def register_release(
+        self,
+        release_id: str,
+        manifest_path: str | Path,
+        heightened_hours: int = 48,
+    ) -> None:
+        """Register new production release and activate heightened monitoring.
+
+        Args:
+            release_id: Unique release identifier
+            manifest_path: Path to release manifest
+            heightened_hours: Duration of heightened monitoring (default: 48)
+
+        Persists:
+            - data/monitoring/releases/active_release.yaml
+            - data/monitoring/releases/<release_id>.yaml
+        """
+        now = datetime.now()
+        heightened_end = now + timedelta(hours=heightened_hours)
+
+        self.active_release_info = {
+            "release_id": release_id,
+            "deployment_timestamp": now.isoformat(),
+            "manifest_path": str(manifest_path),
+            "heightened_monitoring_active": True,
+            "heightened_monitoring_end": heightened_end.isoformat(),
+            "heightened_hours": heightened_hours,
+        }
+
+        self._save_active_release()  # Persist to YAML
+
+    def get_active_release(self) -> dict[str, Any] | None:
+        """Get currently active release info.
+
+        Auto-transitions to normal monitoring after heightened period expires.
+
+        Returns:
+            Active release info dict or None if no active release
+        """
+        if not self.active_release_info:
+            return None
+
+        # Check if heightened period expired
+        heightened_end = datetime.fromisoformat(
+            self.active_release_info["heightened_monitoring_end"]
+        )
+
+        if datetime.now() >= heightened_end:
+            # Auto-transition to normal monitoring
+            self.active_release_info["heightened_monitoring_active"] = False
+            self._save_active_release()
+
+        return self.active_release_info
+
+    def is_in_heightened_monitoring(self) -> bool:
+        """Check if currently in heightened monitoring period."""
+        release = self.get_active_release()
+        if not release:
+            return False
+        return release.get("heightened_monitoring_active", False)
+
+    def get_alert_thresholds(self) -> dict[str, float]:
+        """Get alert thresholds based on current monitoring mode.
+
+        Returns:
+            Dict with threshold values (5% in heightened, 10% in normal)
+        """
+        if self.is_in_heightened_monitoring():
+            # Heightened: 5% degradation triggers alert
+            return {
+                "intraday_hit_ratio_drop": 0.05,
+                "swing_precision_drop": 0.05,
+                "intraday_sharpe_drop": 0.15,
+                "swing_max_drawdown": 0.05,
+            }
+        else:
+            # Normal: 10% degradation triggers alert
+            return {
+                "intraday_hit_ratio_drop": 0.10,
+                "swing_precision_drop": 0.10,
+                "intraday_sharpe_drop": 0.25,
+                "swing_max_drawdown": 0.10,
+            }
+
+    def get_monitoring_window_hours(self) -> dict[str, int]:
+        """Get monitoring window sizes based on current monitoring mode.
+
+        Returns:
+            Dict with window sizes in hours
+        """
+        if self.is_in_heightened_monitoring():
+            # Heightened: shorter windows for faster detection
+            return {
+                "intraday": 6,   # 6 hours vs normal 24h
+                "swing": 24,     # 24 hours vs normal 90 days
+            }
+        else:
+            # Normal: standard windows
+            return {
+                "intraday": 24,
+                "swing": 2160,  # 90 days in hours
+            }
+```
+
+### Dashboard Integration
+
+**File:** `dashboards/telemetry_dashboard.py`
+
+The telemetry dashboard includes an "Active Release" panel that displays:
+
+```python
+def render_active_release(release_info: dict[str, Any]) -> None:
+    """Render active release panel (US-023).
+
+    Displays:
+    - Release ID and deployment timestamp
+    - Monitoring mode (🟡 Heightened or 🟢 Normal)
+    - Time remaining in heightened period
+    - Heightened monitoring details (thresholds, windows)
+    - Manifest path
+    - Rollback button with confirmation
+    """
+    st.subheader("Active Release")
+
+    if not release_info:
+        st.info("No active release registered")
+        return
+
+    # Release overview (4 metric cards)
+    release_cols = st.columns(4)
+
+    with release_cols[0]:
+        st.metric("Release ID", release_info["release_id"])
+
+    with release_cols[1]:
+        deploy_time = datetime.fromisoformat(release_info["deployment_timestamp"])
+        st.metric("Deployed", deploy_time.strftime("%Y-%m-%d %H:%M"))
+
+    with release_cols[2]:
+        if release_info["heightened_monitoring_active"]:
+            st.metric("Monitoring Mode", "🟡 Heightened")
+        else:
+            st.metric("Monitoring Mode", "🟢 Normal")
+
+    with release_cols[3]:
+        if release_info["heightened_monitoring_active"]:
+            heightened_end = datetime.fromisoformat(
+                release_info["heightened_monitoring_end"]
+            )
+            hours_remaining = int(
+                (heightened_end - datetime.now()).total_seconds() / 3600
+            )
+            st.metric("Time Remaining", f"{hours_remaining}h")
+        else:
+            st.metric("Time Remaining", "Completed")
+```
+
+### Approval Gates
+
+All releases require sign-off from:
+
+1. **Engineering Lead**
+   - Technical review of metrics and risks
+   - Verification of test coverage
+   - Approval recorded in audit bundle
+
+2. **Risk Manager**
+   - Assessment of deployment risks
+   - Verification of rollback preparedness
+   - Approval recorded in manifest
+
+3. **Business Owner** (for major releases)
+   - Capital allocation approval
+   - Business impact assessment
+   - Approval recorded in manifest
+
+Approvals are loaded from the audit bundle and embedded in the release manifest with:
+- Role, name, email
+- Timestamp
+- SHA256 signature for authenticity
+
+### Post-Deployment Monitoring Strategy
+
+#### First 48 Hours (Heightened)
+
+**Alert Thresholds:**
+- Intraday hit ratio drop: **5%** (vs normal 10%)
+- Swing precision drop: **5%** (vs normal 10%)
+- Sharpe ratio drop: **0.15** (vs normal 0.25)
+- Max drawdown: **5%** (vs normal 10%)
+
+**Monitoring Windows:**
+- Intraday: **6 hours** (vs normal 24h) for faster detection
+- Swing: **24 hours** (vs normal 90 days) for faster detection
+
+**Alert Frequency:**
+- Check every **2 hours** (vs normal 4-6h)
+
+**Rationale:**
+- Detect deployment issues immediately
+- Minimize blast radius of bugs or parameter drift
+- Enable fast rollback within first business day
+
+#### After 48 Hours (Normal)
+
+Automatically transitions to standard thresholds and windows when:
+```python
+datetime.now() >= release_info["heightened_monitoring_end"]
+```
+
+MonitoringService updates `heightened_monitoring_active` flag and persists to disk.
+
+### Rollback Procedures
+
+#### Automated Rollback (Happy Path)
+
+```bash
+make release-rollback
+# → Prompts: "Are you sure you want to rollback? (type 'yes'): "
+# → yes
+# → Loading previous manifest: release/manifests/release_20251005_180000.yaml
+# → Executing restore commands...
+#   cp release/backups/release_20251005_180000/config.py src/app/config.py
+#   cp release/backups/release_20251005_180000/student_model.pkl data/models/student_model.pkl
+# → Running verification steps...
+#   python scripts/release_audit.py --skip-validation
+#   make test
+# → Rollback complete. Restart trading engine.
+```
+
+#### Manual Rollback (Emergency)
+
+If Makefile is unavailable:
+
+```bash
+# 1. Find previous release
+ls -lt release/manifests/
+
+# 2. Review rollback plan
+cat release/manifests/release_20251005_180000.yaml
+
+# 3. Execute restore commands manually
+cp release/backups/release_20251005_180000/config.py src/app/config.py
+cp release/backups/release_20251005_180000/student_model.pkl data/models/student_model.pkl
+
+# 4. Verify integrity
+sha256sum src/app/config.py
+# Compare with hash in manifest
+
+# 5. Restart engine
+systemctl restart trading-engine
+```
+
+#### Rollback Verification
+
+After rollback, verify:
+
+1. **Artifact Hashes Match:** Compare SHA256 of restored files with manifest
+2. **Tests Pass:** Run `make test` to ensure no regressions
+3. **Audit Clean:** Run `python scripts/release_audit.py --skip-validation` to verify baseline metrics
+4. **Monitoring Normal:** Check dashboard for active release status
+
+### Directory Structure
+
+```
+release/
+├── manifests/                      # Release manifests (YAML)
+│   ├── release_20251012_190000.yaml
+│   └── release_20251005_180000.yaml
+├── backups/                        # Timestamped artifact backups
+│   ├── release_20251012_190000/
+│   │   ├── config.py
+│   │   ├── student_model.pkl
+│   │   └── accuracy_report.ipynb
+│   └── release_20251005_180000/
+│       ├── config.py
+│       └── student_model.pkl
+└── audit_20251012_183000/          # Audit bundle (from US-022)
+    ├── summary.md
+    ├── metrics.json
+    └── plots/
+
+data/monitoring/releases/           # Release tracking persistence
+├── active_release.yaml             # Current active release
+├── release_20251012_190000.yaml    # Historical release records
+└── release_20251005_180000.yaml
+```
+
+### Testing Strategy
+
+**Integration Test:** `tests/integration/test_release_pipeline.py`
+
+Tests include:
+- Manifest generation with SHA256 hash verification
+- Artifact backup creation and integrity
+- Release registration with MonitoringService
+- Heightened monitoring activation (5% thresholds, 6h windows)
+- Auto-transition to normal monitoring after 48h
+- Rollback plan generation with previous manifest reference
+- Release state persistence to YAML files
+- Full end-to-end pipeline simulation
+
+### Related Documentation
+
+- [US-023 Story](stories/us-023-release-deployment.md) - Full specification
+- [US-022 Audit](stories/us-022-release-audit.md) - Pre-deployment audit system
+- [US-013 Monitoring](stories/us-013-monitoring-hardening.md) - Alert system
+- [notebooks/README.md](../notebooks/README.md) - Jupyter notebook integration
+
+---
+
+## 11. Historical Data Ingestion & Teacher Batch Training (US-024 Phase 1)
+
+### Overview
+
+Phase 1 establishes automated historical data acquisition and batch Teacher training infrastructure enabling systematic download of historical OHLCV data and batch training across multiple symbols and time windows.
+
+### Directory Structure
+
+```
+data/
+├── historical/                     # Historical OHLCV data
+│   ├── RELIANCE/
+│   │   ├── 1minute/
+│   │   │   ├── 2024-01-01.csv
+│   │   │   └── ...
+│   │   ├── 5minute/
+│   │   └── 1day/
+│   ├── TCS/
+│   └── INFY/
+└── models/                         # Training artifacts
+    └── 20251012_190000/           # Batch timestamp
+        ├── teacher_runs.json      # Batch metadata (JSON Lines)
+        ├── RELIANCE_2024Q1/       # Per-symbol artifacts
+        └── TCS_2024Q1/
+```
+
+### CSV Schema & Validation
+
+**Required Columns**: timestamp, open, high, low, close, volume
+
+**Validation Rules**:
+- `high >= max(open, close)` and `low <= min(open, close)`
+- `volume >= 0`
+- Timestamps sorted ascending
+
+### Retry/Backoff Policy
+
+- **Retries**: 3 attempts (configurable)
+- **Backoff**: Exponential 2s/4s/8s
+- **Retryable**: ConnectionError, TimeoutError, HTTP 429, 5xx
+- **Non-Retryable**: HTTP 400, 401, 403, 404
+
+### Phase 1 Usage
+
+```bash
+# Fetch historical data
+python scripts/fetch_historical_data.py --symbols RELIANCE TCS --dryrun
+
+# Batch teacher training
+python scripts/train_teacher_batch.py --window-days 90 --resume
+```
+
+---
+
+## 12. Student Batch Retraining & Promotion Integration (US-024 Phase 2)
+
+### Overview
+
+Phase 2 extends US-024 with automated Student model batch retraining from Teacher outputs, generating promotion checklists and recording results for systematic model deployment.
+
+### Directory Structure (Extended)
+
+```
+data/
+└── models/                            # Training artifacts
+    └── 20251012_190000/              # Batch timestamp
+        ├── teacher_runs.json         # Teacher batch metadata (JSON Lines)
+        ├── student_runs.json         # Student batch metadata (JSON Lines) - NEW
+        ├── RELIANCE_2024Q1/          # Teacher artifacts
+        ├── RELIANCE_2024Q1_student/  # Student artifacts - NEW
+        │   ├── student_model.pkl
+        │   ├── training_report.json
+        │   └── promotion_checklist.md
+        ├── TCS_2024Q1/
+        └── TCS_2024Q1_student/       # Student artifacts - NEW
+```
+
+### Student Batch Metadata Schema (student_runs.json)
+
+JSON Lines format linking student runs to teacher runs:
+
+```json
+{"batch_id": "batch_20251012_190000", "symbol": "RELIANCE", "teacher_run_id": "RELIANCE_2024Q1", "teacher_artifacts_path": "data/models/20251012_190000/RELIANCE_2024Q1", "student_artifacts_path": "data/models/20251012_190000/RELIANCE_2024Q1_student", "metrics": {"precision": 0.68, "recall": 0.65, "f1": 0.66}, "promotion_checklist_path": "data/models/20251012_190000/RELIANCE_2024Q1_student/promotion_checklist.md", "status": "success", "timestamp": "2025-10-12T19:15:23+05:30"}
+```
+
+### Workflow
+
+```
+Teacher Batch → Student Batch Training → Promotion Checklists → Deployment
+     ↓                    ↓                        ↓
+teacher_runs.json → student_runs.json → promotion_checklist.md
+```
+
+**Steps**:
+1. Load `teacher_runs.json` to find successful teacher runs
+2. For each successful run, invoke `train_student.py` in batch mode
+3. Pass baseline precision/recall criteria via command-line flags
+4. Auto-generate promotion checklist (no interactive prompts)
+5. Log results to `student_runs.json` (JSON Lines)
+6. Generate batch summary report
+
+### Configuration
+
+```python
+# src/app/config.py
+student_batch_enabled: bool = False  # Safe default - disabled
+student_batch_baseline_precision: float = 0.60
+student_batch_baseline_recall: float = 0.55
+student_batch_output_dir: str = "data/models"
+student_batch_promotion_enabled: bool = True
+```
+
+**Environment Variables**:
+- `STUDENT_BATCH_ENABLED=true` - Enable batch student training
+- `STUDENT_BATCH_BASELINE_PRECISION=0.65` - Custom precision threshold
+- `STUDENT_BATCH_BASELINE_RECALL=0.60` - Custom recall threshold
+
+### Phase 2 Usage
+
+```bash
+# Train students from latest teacher batch
+python scripts/train_student_batch.py
+
+# Train with custom baseline thresholds
+python scripts/train_student_batch.py \
+  --baseline-precision 0.65 \
+  --baseline-recall 0.60
+
+# Resume partial batch (skip already-trained)
+python scripts/train_student_batch.py --resume
+
+# Specify teacher batch directory
+python scripts/train_student_batch.py \
+  --teacher-batch-dir data/models/20251012_190000
+```
+
+### Batch Mode Flags (train_student.py)
+
+```bash
+# Non-interactive batch execution
+python scripts/train_student.py \
+  --teacher-dir data/models/20251012_190000/RELIANCE_2024Q1 \
+  --output-dir data/models/20251012_190000/RELIANCE_2024Q1_student \
+  --batch-mode \
+  --baseline-precision 0.60 \
+  --baseline-recall 0.55
+```
+
+**Flags**:
+- `--batch-mode` - Skip interactive prompts, auto-generate artifacts
+- `--baseline-precision` - Baseline precision for promotion criteria
+- `--baseline-recall` - Baseline recall for promotion criteria
+
+### Promotion Integration
+
+**Automated Checklist Generation**: Each student training generates `promotion_checklist.md` with:
+- Baseline vs Student metrics comparison
+- Go/No-Go recommendation based on thresholds
+- Validation checklist items
+- Deployment steps
+- Rollback procedures
+
+**Batch Summary**: StudentBatchTrainer generates summary with:
+- Total teacher runs processed
+- Student models completed/failed/skipped
+- Success rate
+- Average precision/recall/F1 across all students
+
+### Resume Functionality
+
+```python
+# Checks for student_model.pkl existence
+trainer = StudentBatchTrainer(teacher_batch_dir, resume=True)
+trainer.run_batch()  # Skips already-trained students
+```
+
+**Use Case**: Recover from partial batch failures without re-training successful models.
+
+### Related Documentation
+
+- [US-024 Story](stories/us-024-historical-data.md) - Full specification (Phases 1, 2 & 3)
+- [US-020 Teacher Training](stories/us-020-teacher-training.md) - Teacher model automation
+- [US-009 Student Inference](stories/us-009-student-inference.md) - Student model integration
+
+---
+
+## 13. Sentiment Snapshot Ingestion (US-024 Phase 3)
+
+### Overview
+
+Phase 3 extends US-024 with daily sentiment snapshot ingestion for historical training windows. Sentiment snapshots are fetched using the provider registry (NewsAPI/Twitter/stub), cached locally, and referenced in batch training metadata to enable sentiment-aware model training.
+
+### Directory Structure (Extended)
+
+```
+data/
+├── sentiment/                         # Sentiment snapshots (Phase 3)
+│   ├── RELIANCE/
+│   │   ├── 2024-01-01.jsonl          # Daily sentiment snapshot
+│   │   ├── 2024-01-02.jsonl
+│   │   └── ...
+│   ├── TCS/
+│   └── INFY/
+├── historical/                        # Historical OHLCV data (Phase 1)
+│   └── ...
+└── models/                            # Training artifacts (Phases 1-2)
+    └── 20251012_190000/
+        ├── teacher_runs.json          # Now includes sentiment_snapshot_path
+        ├── student_runs.json          # Inherits sentiment reference
+        └── ...
+```
+
+### Sentiment Snapshot JSON Schema
+
+**File**: `data/sentiment/<symbol>/<YYYY-MM-DD>.jsonl` (JSON Lines format)
+
+```jsonl
+{"symbol": "RELIANCE", "date": "2024-01-01", "timestamp": "2025-10-12T19:05:23+05:30", "score": 0.65, "confidence": 0.82, "providers": ["newsapi", "twitter"], "metadata": {"article_count": 15, "tweet_count": 237}}
+```
+
+**Fields**:
+- `symbol`: Stock symbol
+- `date`: Date (YYYY-MM-DD)
+- `timestamp`: ISO 8601 timestamp when snapshot was fetched
+- `score`: Sentiment score (-1.0 to 1.0)
+  - -1.0: Very negative
+  - 0.0: Neutral
+  - +1.0: Very positive
+- `confidence`: Confidence level (0.0 to 1.0)
+- `providers`: List of providers used for weighted averaging
+- `metadata`: Provider-specific metadata (optional)
+
+### Workflow
+
+```
+Historical Data → Sentiment Snapshots → Teacher Batch → Student Batch
+       ↓                  ↓                    ↓              ↓
+   OHLCV CSVs      Sentiment JSONL      teacher_runs.json  student_runs.json
+                                        (sentiment_path)   (inherited)
+```
+
+**Steps**:
+1. Fetch historical OHLCV data (Phase 1)
+2. Fetch sentiment snapshots for same date range (Phase 3)
+3. Run teacher batch training - checks for sentiment availability
+4. Teacher metadata records `sentiment_snapshot_path` if found
+5. Student batch training inherits sentiment reference from teacher
+6. Models can optionally incorporate sentiment features
+
+### Configuration
+
+```python
+# src/app/config.py
+sentiment_snapshot_enabled: bool = False  # Disabled by default
+sentiment_snapshot_providers: list[str] = ["stub"]  # Safe default
+sentiment_snapshot_output_dir: str = "data/sentiment"
+sentiment_snapshot_retry_limit: int = 3
+sentiment_snapshot_retry_backoff_seconds: int = 2
+sentiment_snapshot_max_per_day: int = 100
+```
+
+**Environment Variables**:
+- `SENTIMENT_SNAPSHOT_ENABLED=true` - Enable sentiment snapshot ingestion
+- `SENTIMENT_SNAPSHOT_PROVIDERS=["newsapi", "twitter"]` - Configure providers
+- `SENTIMENT_SNAPSHOT_OUTPUT_DIR=data/sentiment` - Custom output directory
+
+### Phase 3 Usage
+
+```bash
+# Fetch sentiment snapshots
+python scripts/fetch_sentiment_snapshots.py \
+  --symbols RELIANCE TCS \
+  --start-date 2024-01-01 \
+  --end-date 2024-03-31
+
+# Dryrun mode (no network calls, stub provider)
+python scripts/fetch_sentiment_snapshots.py --dryrun
+
+# Batch training with sentiment
+python scripts/train_teacher_batch.py  # Checks for sentiment snapshots
+python scripts/train_student_batch.py  # Inherits sentiment reference
+```
+
+### Provider Integration
+
+Sentiment snapshots use the existing provider registry (from US-004):
+
+**Supported Providers**:
+- **NewsAPI**: News articles with keyword-based sentiment
+- **Twitter**: Tweet sentiment analysis
+- **Stub**: Neutral sentiment (0.0) for testing
+
+**Fallback & Weighted Averaging**:
+- Primary provider tried first (by priority)
+- Falls back to secondary providers on failure
+- Multiple provider scores weighted and averaged
+- Circuit breaker disables unhealthy providers
+
+### Retry/Backoff Policy
+
+Same as Phase 1 OHLCV ingestion:
+- **Retries**: 3 attempts (configurable)
+- **Backoff**: Exponential 2s/4s/8s
+- **Retryable**: ConnectionError, TimeoutError, HTTP 429, 5xx
+- **Non-Retryable**: HTTP 400, 401, 403, 404
+
+### Metadata Extensions
+
+**Teacher Metadata** (`teacher_runs.json`):
+```jsonl
+{
+  ...
+  "sentiment_snapshot_path": "data/sentiment/RELIANCE",
+  "sentiment_available": true
+}
+```
+
+**Student Metadata** (`student_runs.json`):
+```jsonl
+{
+  ...
+  "sentiment_snapshot_path": "data/sentiment/RELIANCE",
+  "sentiment_available": true
+}
+```
+
+### Caching
+
+- Snapshot files checked before fetch
+- Existing files skipped (unless `--force` flag used)
+- Cache hit rate typically > 90% on re-runs
+- Dryrun mode creates mock snapshots for testing
+
+### Related Documentation
+
+- [US-024 Story](stories/us-024-historical-data.md) - Full specification (Phases 1, 2 & 3)
+- [US-004 Sentiment Integration](stories/us-004-sentiment.md) - Sentiment provider registry
+- [US-020 Teacher Training](stories/us-020-teacher-training.md) - Teacher model automation
+---
+
+## 14. Incremental Daily Updates (US-024 Phase 4)
+
+### Overview
+
+Phase 4 extends US-024 with incremental daily update capabilities, enabling efficient daily refreshes of historical OHLCV and sentiment data without re-downloading existing data. This phase introduces state tracking to remember the last fetch date per symbol and adds incremental modes to batch training scripts.
+
+### Directory Structure (Extended)
+
+```
+data/
+├── state/                             # State tracking (Phase 4)
+│   ├── historical_fetch.json         # Last OHLCV fetch dates
+│   └── sentiment_fetch.json          # Last sentiment fetch dates
+├── sentiment/                         # Sentiment snapshots (Phase 3)
+│   └── ...
+├── historical/                        # Historical OHLCV data (Phase 1)
+│   └── ...
+└── models/                            # Training artifacts (Phases 1-2)
+    └── 20251012_190000/
+        ├── teacher_runs.json          # Includes incremental: true/false
+        └── student_runs.json          # Includes incremental: true/false
+```
+
+### State File JSON Schema
+
+**File**: `data/state/historical_fetch.json` or `sentiment_fetch.json`
+
+```json
+{
+  "symbols": {
+    "RELIANCE": {
+      "last_fetch_date": "2024-03-15T00:00:00",
+      "last_updated": "2024-03-16T18:30:45+05:30"
+    },
+    "TCS": {
+      "last_fetch_date": "2024-03-15T00:00:00",
+      "last_updated": "2024-03-16T18:30:45+05:30"
+    }
+  },
+  "last_run": {
+    "timestamp": "2024-03-16T18:30:45+05:30",
+    "run_type": "incremental",
+    "success": true,
+    "symbols_processed": ["RELIANCE", "TCS"],
+    "files_created": 6,
+    "errors": 0
+  }
+}
+```
+
+**Fields**:
+- `symbols`: Per-symbol state
+  - `last_fetch_date`: ISO 8601 date of last successful fetch
+  - `last_updated`: ISO 8601 timestamp when state was updated
+- `last_run`: Metadata about the last run
+  - `timestamp`: When the run completed
+  - `run_type`: "full" or "incremental"
+  - `success`: Whether run completed without errors
+  - `symbols_processed`: List of symbols in the run
+  - `files_created`: Number of files created/updated
+  - `errors`: Number of errors encountered
+
+### Workflow
+
+```
+Initial Full Run:
+  Historical Data → Sentiment Snapshots → Teacher Batch → Student Batch
+         ↓                 ↓                   ↓              ↓
+    OHLCV CSVs      Sentiment JSONL     teacher_runs.json  student_runs.json
+         ↓                 ↓                   ↓              ↓
+  State File (30d)  State File (30d)   incremental=false  incremental=false
+
+Daily Incremental Update:
+  Historical Data (since last fetch) → Sentiment (since last fetch)
+         ↓                                      ↓
+    New OHLCV CSVs                        New Sentiment JSONL
+         ↓                                      ↓
+    Update State File                     Update State File
+         ↓                                      ↓
+  Teacher Batch (incremental) → Student Batch (incremental)
+         ↓                              ↓
+  Append to teacher_runs.json    Append to student_runs.json
+  (incremental=true)             (incremental=true)
+```
+
+**Steps**:
+1. **First Run** (no state exists):
+   - Fetch last 30 days of historical data (or custom lookback)
+   - Fetch last 30 days of sentiment snapshots
+   - Create state files with last fetch dates
+   - Run teacher/student batch training
+   - Mark metadata with `incremental=false`
+
+2. **Subsequent Incremental Runs** (state exists):
+   - Load state files
+   - Calculate date range: (last_fetch_date + 1) to today
+   - Fetch only new data since last run
+   - Update state files with new last fetch dates
+   - Run teacher/student batch training on new windows
+   - Append new runs to metadata with `incremental=true`
+
+### Configuration
+
+```python
+# src/app/config.py
+incremental_enabled: bool = False  # Disabled by default
+incremental_lookback_days: int = 30  # Lookback window (1-365 days)
+incremental_cron_schedule: str = "0 18 * * 1-5"  # Mon-Fri at 6PM IST
+```
+
+**Environment Variables**:
+- `INCREMENTAL_ENABLED=true` - Enable incremental daily updates
+- `INCREMENTAL_LOOKBACK_DAYS=30` - Lookback window for first run
+- `INCREMENTAL_CRON_SCHEDULE="0 18 * * 1-5"` - Cron schedule hint
+
+### Phase 4 Usage
+
+**Incremental Historical Data Fetch:**
+```bash
+# Fetch only new days since last run
+python scripts/fetch_historical_data.py --incremental
+
+# Incremental with custom lookback (if no previous fetch)
+python scripts/fetch_historical_data.py --incremental --lookback-days 7
+
+# First run: no state exists, uses 30-day lookback (default)
+# Subsequent runs: fetches only days after last fetch date
+```
+
+**Incremental Sentiment Fetch:**
+```bash
+# Fetch only new sentiment snapshots
+python scripts/fetch_sentiment_snapshots.py --incremental
+
+# Dryrun incremental mode
+python scripts/fetch_sentiment_snapshots.py --incremental --dryrun
+```
+
+**Incremental Batch Training:**
+```bash
+# Train only windows with new data
+python scripts/train_teacher_batch.py --incremental
+
+# Student training with incremental flag
+python scripts/train_student_batch.py --incremental
+```
+
+**Complete Incremental Pipeline:**
+```bash
+#!/bin/bash
+# Daily incremental update script (run via cron)
+
+# Fetch new OHLCV data
+python scripts/fetch_historical_data.py --incremental
+
+# Fetch new sentiment snapshots
+python scripts/fetch_sentiment_snapshots.py --incremental --dryrun
+
+# Train teacher models (incremental)
+python scripts/train_teacher_batch.py --incremental
+
+# Train student models (incremental)
+python scripts/train_student_batch.py --incremental
+```
+
+### Scheduling Recommendations
+
+**Cron Schedule** (Mon-Fri at 6PM IST):
+```cron
+0 18 * * 1-5 cd /path/to/SenseQuant && ./scripts/incremental_update.sh >> logs/incremental.log 2>&1
+```
+
+**Configuration** (`.env`):
+```bash
+INCREMENTAL_ENABLED=true
+INCREMENTAL_LOOKBACK_DAYS=30
+INCREMENTAL_CRON_SCHEDULE="0 18 * * 1-5"
+```
+
+**Best Practices**:
+- Run incremental updates daily after market close
+- Keep lookback window at 30+ days for safety
+- Monitor state files for corruption
+- Periodically run full fetch to ensure completeness
+- Check logs for fetch failures and retry manually
+
+### Incremental Mode Behavior
+
+**First Run** (no state exists):
+1. Checks state file → not found
+2. Falls back to lookback window (default: 30 days)
+3. Fetches last 30 days of data
+4. Creates state file with last fetch date
+
+**Subsequent Runs** (state exists):
+1. Loads state file
+2. Gets last fetch date for each symbol
+3. Calculates date range: (last_fetch_date + 1 day) to today
+4. Fetches only new data
+5. Updates state file with new last fetch date
+
+**Resume After Failure**:
+- State file only updated on successful fetch
+- Failed runs don't update state
+- Next run will retry from last successful fetch date
+
+### Error Handling
+
+**Retries**:
+- Same retry/backoff policy as full mode (3 attempts, exponential backoff)
+- Retryable: ConnectionError, TimeoutError, HTTP 429, 5xx
+- Non-retryable: HTTP 400, 401, 403, 404
+
+**State File Corruption**:
+- Invalid JSON → falls back to empty state (full lookback)
+- Missing fields → uses defaults
+- Logged as warning but doesn't fail
+
+**Missing Data Detection**:
+- Gap detection not implemented (future enhancement)
+- Assumes continuous daily fetch cadence
+- Manual full fetch recommended periodically
+
+### StateManager API
+
+```python
+from src.services.state_manager import StateManager
+
+# Initialize state manager
+state_file = Path("data/state/historical_fetch.json")
+manager = StateManager(state_file)
+
+# Get last fetch date for symbol
+last_fetch = manager.get_last_fetch_date("RELIANCE")  # Returns datetime or None
+
+# Set last fetch date for symbol
+manager.set_last_fetch_date("RELIANCE", datetime(2024, 3, 15))
+
+# Get last run info
+run_info = manager.get_last_run_info()  # Returns dict or None
+
+# Set last run info
+manager.set_last_run_info(
+    run_type="incremental",
+    success=True,
+    symbols_processed=["RELIANCE", "TCS"],
+    files_created=6,
+    errors=0
+)
+
+# Get all tracked symbols
+symbols = manager.get_all_symbols()  # Returns list[str]
+
+# Clear specific symbol
+manager.clear_symbol("RELIANCE")
+
+# Clear all state
+manager.clear_all()
+```
+
+### Metadata Extensions
+
+**Teacher Metadata** (`teacher_runs.json`):
+```jsonl
+{
+  "batch_id": "batch_20240316_183512",
+  "symbol": "RELIANCE",
+  "date_range": {"start": "2024-03-16", "end": "2024-03-16"},
+  "window_label": "RELIANCE_2024Q1",
+  "artifacts_path": "data/models/20240316_183512/RELIANCE_2024Q1",
+  "metrics": {"precision": 0.82, "recall": 0.76, "f1": 0.79},
+  "status": "success",
+  "timestamp": "2024-03-16T18:35:12+05:30",
+  "incremental": true,
+  "sentiment_snapshot_path": "data/sentiment/RELIANCE",
+  "sentiment_available": true
+}
+```
+
+**Student Metadata** (`student_runs.json`):
+```jsonl
+{
+  "batch_id": "batch_20240316_184523",
+  "symbol": "RELIANCE",
+  "teacher_run_id": "batch_20240316_183512",
+  "teacher_artifacts_path": "data/models/20240316_183512/RELIANCE_2024Q1",
+  "student_artifacts_path": "data/models/20240316_184523/RELIANCE_student",
+  "metrics": {"accuracy": 0.84, "precision": 0.81, "recall": 0.78},
+  "promotion_checklist_path": "data/models/20240316_184523/RELIANCE_promotion.json",
+  "status": "success",
+  "timestamp": "2024-03-16T18:45:23+05:30",
+  "incremental": true,
+  "sentiment_snapshot_path": "data/sentiment/RELIANCE",
+  "sentiment_available": true
+}
+```
+
+### Related Documentation
+
+- [US-024 Story](stories/us-024-historical-data.md) - Full specification (Phases 1-4)
+- [US-004 Sentiment Integration](stories/us-004-sentiment.md) - Sentiment provider registry
+- [US-020 Teacher Training](stories/us-020-teacher-training.md) - Teacher model automation
+- [US-009 Student Inference](stories/us-009-student-inference.md) - Student model integration
+
+
+---
+
+## 15. Model Validation Workflow (US-025)
+
+### Overview
+
+US-025 provides a comprehensive validation workflow that orchestrates teacher/student batch training, optimizer evaluation, accuracy reporting, and summary generation for historical model validation runs. This workflow enables safe validation of models before live deployment by running in dryrun mode by default.
+
+### Purpose
+
+The validation workflow serves as the quality gate before promoting models to live trading:
+- Execute full teacher & student batch training on historical windows
+- Evaluate strategy configurations with the optimizer in read-only mode
+- Generate updated accuracy reports (Jupyter notebook exports)
+- Produce consolidated validation summaries (JSON + Markdown)
+- Track validation runs in state manager for audit trail
+- Support dryrun mode for safe testing without live data
+
+### Directory Structure
+
+```
+data/
+├── models/                            # Model training artifacts
+│   └── <run_id>/                     # Validation run directory
+│       ├── teacher_runs.json         # Teacher training metadata
+│       ├── student_runs.json         # Student training metadata
+│       └── <symbol>_*/               # Per-symbol model artifacts
+├── optimization/                      # Optimizer evaluation results
+│   └── <run_id>/                     # Validation run optimizations
+│       ├── optimization_results.json # Parameter sweep results
+│       └── best_configs.json         # Top configurations per symbol
+└── state/
+    └── validation_runs.json          # Validation run tracking
+
+release/
+└── audit_<run_id>/                   # Release audit artifacts
+    ├── reports/                       # Generated reports
+    │   ├── accuracy_report.html      # Teacher/student accuracy metrics
+    │   └── optimization_report.html  # Parameter optimization results
+    ├── validation_summary.json       # Machine-readable summary
+    └── validation_summary.md         # Human-readable summary
+
+scripts/
+└── run_model_validation.py           # Validation orchestration script
+```
+
+### Validation Workflow
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│ ModelValidationRunner Workflow                                          │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│ Step 1: Teacher Batch Training                                          │
+│   - Execute scripts/run_teacher_batch_training.py                       │
+│   - Train on historical window (start_date → end_date)                  │
+│   - Output: data/models/<run_id>/teacher_runs.json                      │
+│   - Dryrun: Skip actual training, create mock artifacts                 │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│ Step 2: Student Batch Training                                          │
+│   - Execute scripts/run_student_batch_training.py                       │
+│   - Train student from teacher labels                                   │
+│   - Output: data/models/<run_id>/student_runs.json                      │
+│   - Dryrun: Skip actual training, create mock artifacts                 │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│ Step 3: Optimizer Evaluation (Optional)                                 │
+│   - Execute optimizer in read-only mode                                 │
+│   - Evaluate strategy configurations                                    │
+│   - Output: data/optimization/<run_id>/optimization_results.json        │
+│   - Flag: --skip-optimizer to bypass this step                          │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│ Step 4: Report Generation (Optional)                                    │
+│   - Execute Jupyter notebooks via nbconvert                             │
+│   - Generate HTML reports from accuracy_report.ipynb                    │
+│   - Generate HTML reports from optimization_report.ipynb                │
+│   - Output: release/audit_<run_id>/reports/*.html                       │
+│   - Flag: --skip-reports to bypass this step                            │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│ Step 5: Summary Generation                                              │
+│   - Aggregate metrics from teacher_runs.json, student_runs.json         │
+│   - Include optimizer best configs (if available)                       │
+│   - Generate validation_summary.json (machine-readable)                 │
+│   - Generate validation_summary.md (human-readable)                     │
+│   - Output: release/audit_<run_id>/validation_summary.*                 │
+└─────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────┐
+│ Step 6: State Recording                                                 │
+│   - Record validation run in StateManager                               │
+│   - Store run_id, timestamp, symbols, date_range, status, dryrun flag   │
+│   - Enable audit trail and rerun capability                             │
+│   - Output: data/state/validation_runs.json                             │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Validation Summary Schema
+
+**File**: `release/audit_<run_id>/validation_summary.json`
+
+```json
+{
+  "run_id": "validation_20251012_180000",
+  "timestamp": "2025-10-12T18:00:00+05:30",
+  "symbols": ["RELIANCE", "TCS", "INFY"],
+  "date_range": {
+    "start": "2024-01-01",
+    "end": "2024-12-31"
+  },
+  "status": "completed",
+  "dryrun": true,
+  "teacher_results": {
+    "status": "success",
+    "runs_completed": 3,
+    "avg_precision": 0.82,
+    "avg_recall": 0.78,
+    "avg_f1": 0.80
+  },
+  "student_results": {
+    "status": "success",
+    "runs_completed": 3,
+    "avg_accuracy": 0.84,
+    "avg_precision": 0.81,
+    "avg_recall": 0.78
+  },
+  "optimizer_results": {
+    "status": "success",
+    "best_configs": {
+      "RELIANCE": {
+        "rsi_overbought": 70,
+        "rsi_oversold": 30,
+        "sharpe_ratio": 1.45
+      }
+    }
+  },
+  "reports": {
+    "accuracy_report": "release/audit_validation_20251012_180000/reports/accuracy_report.html",
+    "optimization_report": "release/audit_validation_20251012_180000/reports/optimization_report.html"
+  },
+  "promotion_recommendation": {
+    "approved": true,
+    "reason": "All accuracy thresholds met (accuracy >= 80%, precision >= 75%)",
+    "next_steps": [
+      "Review validation_summary.md",
+      "Verify report outputs",
+      "Promote models to live with scripts/promote_student_models.py"
+    ]
+  }
+}
+```
+
+**Fields**:
+- `run_id`: Unique validation run identifier
+- `timestamp`: ISO 8601 timestamp of run start
+- `symbols`: List of symbols included in validation
+- `date_range`: Historical window (start/end dates)
+- `status`: Run status (completed, failed, partial)
+- `dryrun`: Whether run was executed in dryrun mode
+- `teacher_results`: Aggregated teacher training metrics
+- `student_results`: Aggregated student training metrics
+- `optimizer_results`: Best configuration per symbol
+- `reports`: Paths to generated HTML reports
+- `promotion_recommendation`: Approval status and next steps
+
+### StateManager Integration
+
+**Validation Run Tracking**:
+
+```python
+from src.services.state_manager import StateManager
+
+manager = StateManager("data/state/validation_runs.json")
+
+# Record validation run
+manager.record_validation_run(
+    run_id="validation_20251012_180000",
+    timestamp="2025-10-12T18:00:00+05:30",
+    symbols=["RELIANCE", "TCS"],
+    date_range={"start": "2024-01-01", "end": "2024-12-31"},
+    status="completed",
+    dryrun=True,
+    results={
+        "teacher_results": {"status": "success"},
+        "student_results": {"status": "success"}
+    }
+)
+
+# Get specific validation run
+run = manager.get_validation_run("validation_20251012_180000")
+
+# Get all validation runs (with optional filtering)
+all_runs = manager.get_validation_runs()
+completed_runs = manager.get_validation_runs(status="completed")
+dryrun_runs = manager.get_validation_runs(dryrun=True)
+```
+
+### Usage Examples
+
+**Basic Dryrun Validation** (default mode):
+```bash
+python scripts/run_model_validation.py \
+    --symbols RELIANCE TCS INFY \
+    --start-date 2024-01-01 \
+    --end-date 2024-12-31
+```
+
+**Full Validation with Reports**:
+```bash
+python scripts/run_model_validation.py \
+    --symbols RELIANCE TCS \
+    --start-date 2024-01-01 \
+    --end-date 2024-12-31 \
+    --no-dryrun
+```
+
+**Fast Validation** (skip optimizer and reports):
+```bash
+python scripts/run_model_validation.py \
+    --symbols RELIANCE \
+    --start-date 2024-01-01 \
+    --end-date 2024-03-31 \
+    --skip-optimizer \
+    --skip-reports
+```
+
+**Custom Run ID**:
+```bash
+python scripts/run_model_validation.py \
+    --run-id "validation_q1_2024" \
+    --symbols RELIANCE TCS \
+    --start-date 2024-01-01 \
+    --end-date 2024-03-31
+```
+
+### Configuration
+
+**Default Settings**:
+- `dryrun`: `True` (safe default, prevents accidental live execution)
+- `skip_optimizer`: `False` (run optimizer evaluation by default)
+- `skip_reports`: `False` (generate reports by default)
+- `run_id`: Auto-generated from timestamp (`validation_YYYYMMDD_HHMMSS`)
+
+**Environment Variables**:
+- `VALIDATION_DATA_DIR`: Base directory for validation artifacts (default: `data/`)
+- `VALIDATION_RELEASE_DIR`: Base directory for release audits (default: `release/`)
+
+### Operational Playbook
+
+**Pre-Validation Checklist**:
+- [ ] Verify historical data available for date range
+- [ ] Verify sentiment snapshots available (if using sentiment)
+- [ ] Confirm sufficient disk space for artifacts
+- [ ] Review symbols list (recommend <= 10 for initial run)
+- [ ] Decide on dryrun vs. real validation
+
+**Execution Steps**:
+1. Run validation with dryrun mode first
+2. Review validation_summary.md for any issues
+3. If dryrun succeeds, run with `--no-dryrun`
+4. Review generated reports in `release/audit_<run_id>/reports/`
+5. Check promotion_recommendation in validation_summary.json
+6. If approved, promote models with `scripts/promote_student_models.py`
+
+**Post-Validation Actions**:
+- Archive validation artifacts for compliance
+- Update production deployment checklist
+- Schedule next validation run
+- Monitor live performance after promotion
+
+### Promotion Approval Criteria
+
+Models are approved for promotion if:
+- **Student Accuracy** >= 80%
+- **Student Precision** >= 75%
+- **Student Recall** >= 70%
+- **Teacher F1 Score** >= 0.75
+- **Optimizer Sharpe Ratio** >= 1.0 (if available)
+- **No critical errors** in validation logs
+- **All reports generated** successfully
+
+### Integration with Existing Workflows
+
+**Teacher/Student Training** (US-020, US-021):
+- Validation workflow calls existing batch training scripts
+- Reuses teacher_runs.json and student_runs.json metadata
+- Compatible with incremental training (US-024 Phase 4)
+
+**Optimizer** (US-019):
+- Validation runs optimizer in read-only evaluation mode
+- No modifications to telemetry or live configs
+- Results stored separately under data/optimization/<run_id>/
+
+**Release Audit** (US-022):
+- Validation summary feeds into release audit workflow
+- Reports stored in release/audit_<run_id>/ for compliance
+- State manager tracks all validation runs for audit trail
+
+**Monitoring** (US-013):
+- Validation runs logged to structured logs
+- Metrics exported for dashboard tracking
+- Alerts on validation failures or accuracy degradation
+
+### Error Handling
+
+**Validation Failures**:
+- Teacher training failure: Mark run as "failed", skip student training
+- Student training failure: Mark run as "failed", continue to summary
+- Optimizer failure: Log warning, mark optimizer_results as "failed"
+- Report generation failure: Log warning, validation continues
+- Summary generation failure: Mark run as "failed", log detailed error
+
+**Partial Completions**:
+- If some symbols succeed and others fail, status = "partial"
+- Summary includes per-symbol success/failure breakdown
+- Promotion recommendation = "rejected" for partial runs
+
+**Dryrun Mode**:
+- All subprocess calls logged but not executed
+- Mock artifacts created for testing
+- No impact on live data or telemetry
+- Status always "completed" (validates workflow, not models)
+
+### Related Documentation
+
+- [US-025 Story](stories/us-025-model-validation.md) - Full specification with acceptance criteria
+- [US-020 Teacher Training](stories/us-020-teacher-training.md) - Teacher batch automation
+- [US-021 Student Promotion](stories/us-021-student-promotion.md) - Student promotion workflow
+- [US-019 Optimizer](stories/us-019-optimizer.md) - Strategy configuration optimization
+- [US-022 Release Audit](stories/us-022-release-audit.md) - Release compliance workflow
+- [US-024 Historical Data](stories/us-024-historical-data.md) - Historical data ingestion
+
+### Future Enhancements
+
+- **Automated Scheduling**: Cron job for weekly/monthly validation runs
+- **Slack Notifications**: Alert on validation completion/failure
+- **Comparison Reports**: Compare current vs. previous validation runs
+- **A/B Testing**: Validate multiple model variants in parallel
+- **Performance Benchmarking**: Track validation execution time and resource usage

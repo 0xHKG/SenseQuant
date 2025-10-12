@@ -194,6 +194,25 @@ def parse_args() -> argparse.Namespace:
         help="Minimum Sharpe ratio uplift vs baseline for promotion (e.g., 0.1)",
     )
 
+    # US-024 Phase 2: Batch mode flags
+    parser.add_argument(
+        "--batch-mode",
+        action="store_true",
+        help="Non-interactive batch mode (skip prompts, auto-generate checklists)",
+    )
+
+    parser.add_argument(
+        "--baseline-precision",
+        type=float,
+        help="Baseline precision for promotion criteria (batch mode only)",
+    )
+
+    parser.add_argument(
+        "--baseline-recall",
+        type=float,
+        help="Baseline recall for promotion criteria (batch mode only)",
+    )
+
     return parser.parse_args()
 
 

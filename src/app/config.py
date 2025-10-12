@@ -471,6 +471,142 @@ class Settings(BaseSettings):  # type: ignore[misc]
         12, validation_alias="STUDENT_AUTO_ROLLBACK_CONFIRMATION_HOURS", ge=1, le=72
     )  # Hours to wait before auto-rollback (confirmation period)
 
+    # =====================================================================
+    # US-024: Historical Data Ingestion Configuration
+    # =====================================================================
+    historical_data_symbols: list[str] = Field(
+        default=["RELIANCE", "TCS", "INFY"],
+        validation_alias="HISTORICAL_DATA_SYMBOLS",
+    )  # Symbols to download historical data for
+    historical_data_intervals: list[str] = Field(
+        default=["1minute", "5minute", "1day"],
+        validation_alias="HISTORICAL_DATA_INTERVALS",
+    )  # Time intervals to download (1minute, 5minute, 1hour, 1day)
+    historical_data_start_date: str = Field(
+        "2024-01-01", validation_alias="HISTORICAL_DATA_START_DATE"
+    )  # Start date for historical data (YYYY-MM-DD)
+    historical_data_end_date: str = Field(
+        "2024-12-31", validation_alias="HISTORICAL_DATA_END_DATE"
+    )  # End date for historical data (YYYY-MM-DD)
+    historical_data_output_dir: str = Field(
+        "data/historical", validation_alias="HISTORICAL_DATA_OUTPUT_DIR"
+    )  # Directory to store historical OHLCV CSVs
+    historical_data_retry_limit: int = Field(
+        3, validation_alias="HISTORICAL_DATA_RETRY_LIMIT", ge=1, le=10
+    )  # Number of retry attempts for failed API calls
+    historical_data_retry_backoff_seconds: int = Field(
+        2, validation_alias="HISTORICAL_DATA_RETRY_BACKOFF_SECONDS", ge=1, le=30
+    )  # Base delay for exponential backoff (seconds)
+
+    # =====================================================================
+    # US-024: Batch Training Configuration
+    # =====================================================================
+    batch_training_enabled: bool = Field(
+        False, validation_alias="BATCH_TRAINING_ENABLED"
+    )  # Enable batch teacher training
+    batch_training_window_days: int = Field(
+        90, validation_alias="BATCH_TRAINING_WINDOW_DAYS", ge=7, le=365
+    )  # Training window size in days
+    batch_training_forecast_horizon_days: int = Field(
+        7, validation_alias="BATCH_TRAINING_FORECAST_HORIZON_DAYS", ge=1, le=30
+    )  # Forecast horizon for teacher labels in days
+    batch_training_output_dir: str = Field(
+        "data/models", validation_alias="BATCH_TRAINING_OUTPUT_DIR"
+    )  # Directory to store batch training artifacts
+    batch_training_parallel_workers: int = Field(
+        1, validation_alias="BATCH_TRAINING_PARALLEL_WORKERS", ge=1, le=16
+    )  # Number of parallel workers (1 = sequential)
+
+    # =====================================================================
+    # US-024 Phase 2: Student Batch Training Configuration
+    # =====================================================================
+    student_batch_enabled: bool = Field(
+        False, validation_alias="STUDENT_BATCH_ENABLED"
+    )  # Enable batch student training
+    student_batch_baseline_precision: float = Field(
+        0.60, validation_alias="STUDENT_BATCH_BASELINE_PRECISION", ge=0.0, le=1.0
+    )  # Baseline precision for student model promotion
+    student_batch_baseline_recall: float = Field(
+        0.55, validation_alias="STUDENT_BATCH_BASELINE_RECALL", ge=0.0, le=1.0
+    )  # Baseline recall for student model promotion
+    student_batch_output_dir: str = Field(
+        "data/models", validation_alias="STUDENT_BATCH_OUTPUT_DIR"
+    )  # Directory to store student batch training artifacts
+    student_batch_promotion_enabled: bool = Field(
+        True, validation_alias="STUDENT_BATCH_PROMOTION_ENABLED"
+    )  # Enable automatic promotion checklist generation
+
+    # US-024 Phase 3: Sentiment Snapshot Configuration
+    sentiment_snapshot_enabled: bool = Field(
+        False, validation_alias="SENTIMENT_SNAPSHOT_ENABLED"
+    )  # Enable sentiment snapshot ingestion (disabled by default)
+    sentiment_snapshot_providers: list[str] = Field(
+        ["stub"], validation_alias="SENTIMENT_SNAPSHOT_PROVIDERS"
+    )  # Sentiment providers to use (e.g., ["newsapi", "twitter", "stub"])
+    sentiment_snapshot_output_dir: str = Field(
+        "data/sentiment", validation_alias="SENTIMENT_SNAPSHOT_OUTPUT_DIR"
+    )  # Directory to store sentiment snapshots
+    sentiment_snapshot_retry_limit: int = Field(
+        3, validation_alias="SENTIMENT_SNAPSHOT_RETRY_LIMIT", ge=1, le=10
+    )  # Maximum retry attempts for sentiment fetch
+    sentiment_snapshot_retry_backoff_seconds: int = Field(
+        2, validation_alias="SENTIMENT_SNAPSHOT_RETRY_BACKOFF_SECONDS", ge=1, le=60
+    )  # Base backoff delay in seconds for retries
+    sentiment_snapshot_max_per_day: int = Field(
+        100, validation_alias="SENTIMENT_SNAPSHOT_MAX_PER_DAY", ge=1
+    )  # Maximum sentiment fetches per day (rate limiting)
+
+    # US-024 Phase 4: Incremental Daily Updates Configuration
+    incremental_enabled: bool = Field(
+        False, validation_alias="INCREMENTAL_ENABLED"
+    )  # Enable incremental daily updates (disabled by default)
+    incremental_lookback_days: int = Field(
+        30, validation_alias="INCREMENTAL_LOOKBACK_DAYS", ge=1, le=365
+    )  # Lookback window for incremental fetch (days)
+    incremental_cron_schedule: str = Field(
+        "0 18 * * 1-5", validation_alias="INCREMENTAL_CRON_SCHEDULE"
+    )  # Cron schedule for incremental runs (Mon-Fri at 6PM)
+
+    # US-024 Phase 5: Distributed Training & Scheduled Automation Configuration
+    parallel_workers: int = Field(
+        1, validation_alias="PARALLEL_WORKERS", ge=1, le=32
+    )  # Number of parallel workers for batch training (1 = sequential)
+    parallel_retry_limit: int = Field(
+        3, validation_alias="PARALLEL_RETRY_LIMIT", ge=1, le=10
+    )  # Max retry attempts for failed batch tasks
+    parallel_retry_backoff_seconds: int = Field(
+        5, validation_alias="PARALLEL_RETRY_BACKOFF_SECONDS", ge=1, le=60
+    )  # Backoff between retries (seconds)
+    scheduled_pipeline_skip_fetch: bool = Field(
+        False, validation_alias="SCHEDULED_PIPELINE_SKIP_FETCH"
+    )  # Skip data fetch phase in scheduled pipeline
+    scheduled_pipeline_skip_teacher: bool = Field(
+        False, validation_alias="SCHEDULED_PIPELINE_SKIP_TEACHER"
+    )  # Skip teacher training phase in scheduled pipeline
+    scheduled_pipeline_skip_student: bool = Field(
+        False, validation_alias="SCHEDULED_PIPELINE_SKIP_STUDENT"
+    )  # Skip student training phase in scheduled pipeline
+
+    # US-024 Phase 6: Data Quality Dashboard & Alerts Configuration
+    data_quality_scan_enabled: bool = Field(
+        False, validation_alias="DATA_QUALITY_SCAN_ENABLED"
+    )  # Enable automatic data quality scanning (disabled by default)
+    data_quality_scan_after_fetch: bool = Field(
+        True, validation_alias="DATA_QUALITY_SCAN_AFTER_FETCH"
+    )  # Run quality scan after data fetch
+    data_quality_alert_threshold_missing_files: int = Field(
+        10, validation_alias="DATA_QUALITY_ALERT_THRESHOLD_MISSING_FILES", ge=0
+    )  # Alert if missing files exceed this count
+    data_quality_alert_threshold_duplicate_timestamps: int = Field(
+        100, validation_alias="DATA_QUALITY_ALERT_THRESHOLD_DUPLICATE_TIMESTAMPS", ge=0
+    )  # Alert if duplicate timestamps exceed this count
+    data_quality_alert_threshold_zero_volume: int = Field(
+        50, validation_alias="DATA_QUALITY_ALERT_THRESHOLD_ZERO_VOLUME", ge=0
+    )  # Alert if zero-volume bars exceed this count
+    data_quality_dashboard_enabled: bool = Field(
+        False, validation_alias="DATA_QUALITY_DASHBOARD_ENABLED"
+    )  # Enable Streamlit dashboard (requires streamlit package)
+
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore", case_sensitive=False
     )

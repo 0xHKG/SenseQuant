@@ -17,6 +17,8 @@ Features:
     - Alert panel for degradation warnings
     - Symbol-level drill-down
     - Auto-refresh with configurable interval
+    - Student model monitoring status (US-021)
+    - Active release deployment tracking (US-023)
     - No live API calls (uses cached data only)
 """
 
@@ -411,6 +413,44 @@ def render_cumulative_returns(
     st.plotly_chart(fig, use_container_width=True)
 
 
+def load_active_release(
+    releases_dir: str = "data/monitoring/releases",
+) -> dict[str, Any]:
+    """Load active release information (US-023).
+
+    Args:
+        releases_dir: Directory containing release tracking data
+
+    Returns:
+        Dictionary with active release info or empty dict if not available
+    """
+    try:
+        active_release_path = Path(releases_dir) / "active_release.yaml"
+
+        if not active_release_path.exists():
+            return {}
+
+        import yaml
+
+        with open(active_release_path) as f:
+            release_info = yaml.safe_load(f)
+
+        # Auto-transition to normal monitoring after 48h
+        heightened_end_str = release_info.get("heightened_monitoring_end")
+        if heightened_end_str:
+            from datetime import datetime
+
+            heightened_end = datetime.fromisoformat(heightened_end_str)
+            if datetime.now() >= heightened_end:
+                release_info["heightened_monitoring_active"] = False
+
+        return release_info
+
+    except Exception as e:
+        logger.error(f"Failed to load active release: {e}")
+        return {}
+
+
 def load_student_monitoring_status(
     monitoring_dir: str = "data/monitoring/student_model",
 ) -> dict[str, Any]:
@@ -471,6 +511,106 @@ def load_student_monitoring_status(
     except Exception as e:
         logger.error(f"Failed to load student monitoring status: {e}")
         return {}
+
+
+def render_active_release(release_info: dict[str, Any]) -> None:
+    """Render active release panel (US-023).
+
+    Args:
+        release_info: Active release information dictionary
+    """
+    st.subheader("Active Release")
+
+    if not release_info:
+        st.info("No active release registered")
+        return
+
+    # Release overview
+    release_cols = st.columns(4)
+
+    with release_cols[0]:
+        release_id = release_info.get("release_id", "Unknown")
+        st.metric("Release ID", release_id)
+
+    with release_cols[1]:
+        deployment_timestamp = release_info.get("deployment_timestamp", "")
+        if deployment_timestamp:
+            from datetime import datetime
+
+            deploy_time = datetime.fromisoformat(deployment_timestamp)
+            deploy_str = deploy_time.strftime("%Y-%m-%d %H:%M")
+            st.metric("Deployed", deploy_str)
+        else:
+            st.metric("Deployed", "Unknown")
+
+    with release_cols[2]:
+        heightened_active = release_info.get("heightened_monitoring_active", False)
+        if heightened_active:
+            st.metric("Monitoring Mode", "🟡 Heightened")
+        else:
+            st.metric("Monitoring Mode", "🟢 Normal")
+
+    with release_cols[3]:
+        if heightened_active:
+            heightened_end_str = release_info.get("heightened_monitoring_end", "")
+            if heightened_end_str:
+                from datetime import datetime
+
+                heightened_end = datetime.fromisoformat(heightened_end_str)
+                time_remaining = heightened_end - datetime.now()
+                hours_remaining = int(time_remaining.total_seconds() / 3600)
+                st.metric("Time Remaining", f"{hours_remaining}h")
+            else:
+                st.metric("Time Remaining", "N/A")
+        else:
+            st.metric("Time Remaining", "Completed")
+
+    # Heightened monitoring details
+    if heightened_active:
+        st.markdown("**Heightened Monitoring Active:**")
+        heightened_cols = st.columns(2)
+
+        with heightened_cols[0]:
+            st.markdown(
+                """
+                - Alert thresholds: **5%** (vs normal 10%)
+                - Intraday window: **6 hours** (vs normal 24h)
+                - Swing window: **24 hours** (vs normal 90 days)
+                """
+            )
+
+        with heightened_cols[1]:
+            heightened_hours = release_info.get("heightened_hours", 48)
+            heightened_end_str = release_info.get("heightened_monitoring_end", "")
+            if heightened_end_str:
+                from datetime import datetime
+
+                heightened_end = datetime.fromisoformat(heightened_end_str)
+                st.markdown(
+                    f"""
+                    - Duration: **{heightened_hours} hours**
+                    - Ends: **{heightened_end.strftime("%Y-%m-%d %H:%M")}**
+                    """
+                )
+
+    # Manifest path
+    manifest_path = release_info.get("manifest_path", "")
+    if manifest_path:
+        st.markdown(f"**Manifest:** `{manifest_path}`")
+
+    # Rollback button with confirmation
+    st.markdown("---")
+    rollback_col1, rollback_col2 = st.columns([1, 3])
+
+    with rollback_col1:
+        if st.button("🔄 Rollback Release", type="primary"):
+            st.session_state["confirm_rollback"] = True
+
+    with rollback_col2:
+        if st.session_state.get("confirm_rollback"):
+            st.warning("⚠️ This will execute `make release-rollback`. Confirm in terminal.")
+            if st.button("Cancel"):
+                st.session_state["confirm_rollback"] = False
 
 
 def render_student_model_status(status: dict[str, Any]) -> None:
@@ -857,6 +997,13 @@ def main() -> None:
     st.header("Student Model Monitoring")
     student_status = load_student_monitoring_status()
     render_student_model_status(student_status)
+
+    st.markdown("---")
+
+    # US-023: Active Release Panel
+    st.header("Release Deployment")
+    release_info = load_active_release()
+    render_active_release(release_info)
 
     # Auto-refresh
     if refresh_interval > 0:

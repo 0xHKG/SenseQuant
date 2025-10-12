@@ -1543,6 +1543,7 @@ class MonitoringService:
         active_file = self.releases_dir / "active_release.yaml"
         if active_file.exists():
             import yaml
+
             with open(active_file) as f:
                 self.active_release_info = yaml.safe_load(f)
             logger.debug(
@@ -1563,6 +1564,7 @@ class MonitoringService:
             heightened_hours: Duration of heightened monitoring in hours (default: 48)
         """
         from datetime import datetime, timedelta
+
         import yaml
 
         now = datetime.now()

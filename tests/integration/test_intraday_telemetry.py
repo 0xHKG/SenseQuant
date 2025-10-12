@@ -62,9 +62,7 @@ def mock_client():
     return client
 
 
-def test_intraday_backtest_telemetry_capture(
-    backtest_config, mock_client, settings, tmp_path
-):
+def test_intraday_backtest_telemetry_capture(backtest_config, mock_client, settings, tmp_path):
     """Test that intraday backtest generates telemetry with correct format."""
     # Create telemetry directory
     telemetry_dir = tmp_path / "telemetry_intraday"

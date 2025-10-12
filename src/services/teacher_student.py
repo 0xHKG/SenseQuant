@@ -612,6 +612,91 @@ class TeacherLabeler:
 
         return result
 
+    @staticmethod
+    def log_batch_metadata(
+        metadata_file: Path,
+        batch_id: str,
+        symbol: str,
+        date_range: dict[str, str],
+        artifacts_path: str,
+        metrics: dict[str, float] | None,
+        status: str,
+        error: str | None = None,
+        sentiment_snapshot_path: str | None = None,
+    ) -> None:
+        """Log batch training metadata to JSON Lines file (US-024 Phases 1-3).
+
+        Args:
+            metadata_file: Path to JSON Lines metadata file
+            batch_id: Unique batch identifier
+            symbol: Stock symbol
+            date_range: Dict with 'start' and 'end' date strings
+            artifacts_path: Path to training artifacts
+            metrics: Training metrics dict (precision, recall, f1, etc.)
+            status: Training status ('success' or 'failed')
+            error: Error message if status is 'failed'
+            sentiment_snapshot_path: Path to sentiment snapshot directory (Phase 3)
+        """
+        import json
+        from datetime import datetime
+
+        metadata = {
+            "batch_id": batch_id,
+            "symbol": symbol,
+            "date_range": date_range,
+            "artifacts_path": artifacts_path,
+            "metrics": metrics,
+            "status": status,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        if error:
+            metadata["error"] = error
+
+        # US-024 Phase 3: Add sentiment snapshot reference
+        if sentiment_snapshot_path is not None:
+            metadata["sentiment_snapshot_path"] = sentiment_snapshot_path
+            metadata["sentiment_available"] = True
+        else:
+            metadata["sentiment_available"] = False
+
+        # Append to JSON Lines file
+        with open(metadata_file, "a") as f:
+            f.write(json.dumps(metadata) + "\n")
+
+        logger.debug(
+            f"Logged batch metadata for {symbol}",
+            extra={
+                "component": "teacher",
+                "batch_id": batch_id,
+                "symbol": symbol,
+                "status": status,
+            },
+        )
+
+    @staticmethod
+    def load_batch_metadata(metadata_file: Path) -> list[dict]:
+        """Load batch metadata from JSON Lines file (US-024).
+
+        Args:
+            metadata_file: Path to JSON Lines metadata file
+
+        Returns:
+            List of metadata dicts
+        """
+        import json
+
+        if not metadata_file.exists():
+            return []
+
+        metadata_list = []
+        with open(metadata_file) as f:
+            for line in f:
+                if line.strip():
+                    metadata_list.append(json.loads(line))
+
+        return metadata_list
+
 
 class StudentModel:
     """Lightweight Student model for real-time inference.
@@ -1022,6 +1107,138 @@ class StudentModel:
             return False
 
         return True
+
+    @staticmethod
+    def log_batch_metadata(
+        metadata_file: Path,
+        batch_id: str,
+        symbol: str,
+        teacher_run_id: str,
+        teacher_artifacts_path: str,
+        student_artifacts_path: str,
+        metrics: dict[str, float] | None,
+        promotion_checklist_path: str | None,
+        status: str,
+        error: str | None = None,
+        sentiment_snapshot_path: str | None = None,
+        incremental: bool = False,
+    ) -> None:
+        """Log student batch training metadata to JSON Lines file (US-024 Phases 2-4).
+
+        Args:
+            metadata_file: Path to JSON Lines metadata file
+            batch_id: Unique batch identifier
+            symbol: Stock symbol
+            teacher_run_id: ID of corresponding teacher run
+            teacher_artifacts_path: Path to teacher artifacts
+            student_artifacts_path: Path to student artifacts
+            metrics: Student model metrics dict (precision, recall, f1, etc.)
+            promotion_checklist_path: Path to promotion checklist file
+            status: Training status ('success' or 'failed')
+            error: Error message if status is 'failed'
+            sentiment_snapshot_path: Path to sentiment snapshot directory (Phase 3)
+            incremental: Whether this is an incremental run (Phase 4)
+        """
+        import json
+        from datetime import datetime
+
+        metadata = {
+            "batch_id": batch_id,
+            "symbol": symbol,
+            "teacher_run_id": teacher_run_id,
+            "teacher_artifacts_path": teacher_artifacts_path,
+            "student_artifacts_path": student_artifacts_path,
+            "metrics": metrics,
+            "promotion_checklist_path": promotion_checklist_path,
+            "status": status,
+            "timestamp": datetime.now().isoformat(),
+            "incremental": incremental,  # US-024 Phase 4
+        }
+
+        if error:
+            metadata["error"] = error
+
+        # US-024 Phase 3: Add sentiment snapshot reference
+        if sentiment_snapshot_path is not None:
+            metadata["sentiment_snapshot_path"] = sentiment_snapshot_path
+            metadata["sentiment_available"] = True
+        else:
+            metadata["sentiment_available"] = False
+
+        # Append to JSON Lines file
+        with open(metadata_file, "a") as f:
+            f.write(json.dumps(metadata) + "\n")
+
+        logger.debug(
+            f"Logged student batch metadata for {symbol}",
+            extra={
+                "component": "student",
+                "batch_id": batch_id,
+                "symbol": symbol,
+                "status": status,
+            },
+        )
+
+    @staticmethod
+    def load_batch_metadata(metadata_file: Path) -> list[dict]:
+        """Load student batch metadata from JSON Lines file (US-024 Phase 2).
+
+        Args:
+            metadata_file: Path to JSON Lines metadata file
+
+        Returns:
+            List of metadata dicts
+        """
+        import json
+
+        if not metadata_file.exists():
+            return []
+
+        metadata_list = []
+        with open(metadata_file) as f:
+            for line in f:
+                if line.strip():
+                    metadata_list.append(json.loads(line))
+
+        return metadata_list
+
+    @staticmethod
+    def summarize_batch_results(metadata_list: list[dict]) -> dict[str, Any]:
+        """Summarize student batch results (US-024 Phase 2).
+
+        Args:
+            metadata_list: List of student metadata dicts
+
+        Returns:
+            Summary dict with success rate and avg metrics
+        """
+        if not metadata_list:
+            return {
+                "total": 0,
+                "successful": 0,
+                "failed": 0,
+                "success_rate": 0.0,
+                "avg_precision": 0.0,
+                "avg_recall": 0.0,
+                "avg_f1": 0.0,
+            }
+
+        successful = [m for m in metadata_list if m.get("status") == "success"]
+
+        # Calculate average metrics
+        precisions = [m["metrics"]["precision"] for m in successful if m.get("metrics")]
+        recalls = [m["metrics"]["recall"] for m in successful if m.get("metrics")]
+        f1s = [m["metrics"]["f1"] for m in successful if m.get("metrics") and "f1" in m["metrics"]]
+
+        return {
+            "total": len(metadata_list),
+            "successful": len(successful),
+            "failed": len(metadata_list) - len(successful),
+            "success_rate": len(successful) / len(metadata_list) if metadata_list else 0.0,
+            "avg_precision": sum(precisions) / len(precisions) if precisions else 0.0,
+            "avg_recall": sum(recalls) / len(recalls) if recalls else 0.0,
+            "avg_f1": sum(f1s) / len(f1s) if f1s else 0.0,
+        }
 
 
 class StudentModelPromoter:

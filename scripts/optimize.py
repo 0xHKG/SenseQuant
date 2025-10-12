@@ -748,15 +748,11 @@ def generate_deployment_plan(
     best_metrics = best.get("metrics", {})
     best_acc = best.get("accuracy_metrics", {})
 
-    sharpe_improvement = (
-        best_metrics.get("sharpe_ratio", 0.0) - baseline.get("sharpe_ratio", 0.0)
+    sharpe_improvement = best_metrics.get("sharpe_ratio", 0.0) - baseline.get("sharpe_ratio", 0.0)
+    precision_improvement = best_acc.get("precision_long", 0.0) - baseline.get(
+        "precision_long", 0.0
     )
-    precision_improvement = (
-        best_acc.get("precision_long", 0.0) - baseline.get("precision_long", 0.0)
-    )
-    hit_ratio_improvement = (
-        best_acc.get("hit_ratio", 0.0) - baseline.get("hit_ratio", 0.0)
-    )
+    hit_ratio_improvement = best_acc.get("hit_ratio", 0.0) - baseline.get("hit_ratio", 0.0)
 
     # Determine validation thresholds (conservative: require 80% of improvement maintained)
     min_sharpe = baseline.get("sharpe_ratio", 0.0) + (sharpe_improvement * 0.8)
@@ -776,9 +772,9 @@ def generate_deployment_plan(
 
 This deployment plan outlines the process for safely rolling out optimized strategy parameters to production. The optimized configuration showed significant improvements over baseline:
 
-- **Sharpe Ratio**: {baseline.get('sharpe_ratio', 0.0):.2f} → {best_metrics.get('sharpe_ratio', 0.0):.2f} ({sharpe_improvement:+.2f}, {sharpe_improvement / max(baseline.get('sharpe_ratio', 0.01), 0.01) * 100:+.1f}%)
-- **Precision (LONG)**: {baseline.get('precision_long', 0.0):.2%} → {best_acc.get('precision_long', 0.0):.2%} ({precision_improvement:+.2%})
-- **Hit Ratio**: {baseline.get('hit_ratio', 0.0):.2%} → {best_acc.get('hit_ratio', 0.0):.2%} ({hit_ratio_improvement:+.2%})
+- **Sharpe Ratio**: {baseline.get("sharpe_ratio", 0.0):.2f} → {best_metrics.get("sharpe_ratio", 0.0):.2f} ({sharpe_improvement:+.2f}, {sharpe_improvement / max(baseline.get("sharpe_ratio", 0.01), 0.01) * 100:+.1f}%)
+- **Precision (LONG)**: {baseline.get("precision_long", 0.0):.2%} → {best_acc.get("precision_long", 0.0):.2%} ({precision_improvement:+.2%})
+- **Hit Ratio**: {baseline.get("hit_ratio", 0.0):.2%} → {best_acc.get("hit_ratio", 0.0):.2%} ({hit_ratio_improvement:+.2%})
 
 **⚠️ IMPORTANT**: This plan does NOT modify production configs automatically. Manual review and approval required.
 
@@ -787,12 +783,12 @@ This deployment plan outlines the process for safely rolling out optimized strat
 ## Baseline Configuration (Current Production)
 
 **Current Metrics**:
-- Sharpe Ratio: {baseline.get('sharpe_ratio', 0.0):.2f}
-- Total Return: {baseline.get('total_return', 0.0) * 100:.1f}%
-- Win Rate: {baseline.get('win_rate', 0.0) * 100:.1f}%
-- Precision (LONG): {baseline.get('precision_long', 0.0):.1%}
-- Hit Ratio: {baseline.get('hit_ratio', 0.0):.1%}
-- Total Trades: {baseline.get('total_trades', 0)}
+- Sharpe Ratio: {baseline.get("sharpe_ratio", 0.0):.2f}
+- Total Return: {baseline.get("total_return", 0.0) * 100:.1f}%
+- Win Rate: {baseline.get("win_rate", 0.0) * 100:.1f}%
+- Precision (LONG): {baseline.get("precision_long", 0.0):.1%}
+- Hit Ratio: {baseline.get("hit_ratio", 0.0):.1%}
+- Total Trades: {baseline.get("total_trades", 0)}
 
 **Baseline Config Location**: `src/app/config.py` (defaults)
 
@@ -800,20 +796,20 @@ This deployment plan outlines the process for safely rolling out optimized strat
 
 ## Optimized Configuration (Recommended)
 
-**Config ID**: `{best['config_id']}`
-**Composite Score**: {best['score']:.3f}
+**Config ID**: `{best["config_id"]}`
+**Composite Score**: {best["score"]:.3f}
 
 **Optimized Metrics**:
-- Sharpe Ratio: {best_metrics.get('sharpe_ratio', 0.0):.2f}
-- Total Return: {best_metrics.get('total_return_pct', 0.0):.1f}%
-- Win Rate: {best_metrics.get('win_rate_pct', 0.0):.1f}%
-- Precision (LONG): {best_acc.get('precision_long', 0.0):.1%}
-- Hit Ratio: {best_acc.get('hit_ratio', 0.0):.1%}
+- Sharpe Ratio: {best_metrics.get("sharpe_ratio", 0.0):.2f}
+- Total Return: {best_metrics.get("total_return_pct", 0.0):.1f}%
+- Win Rate: {best_metrics.get("win_rate_pct", 0.0):.1f}%
+- Precision (LONG): {best_acc.get("precision_long", 0.0):.1%}
+- Hit Ratio: {best_acc.get("hit_ratio", 0.0):.1%}
 
 **Recommended Parameters**:
 ```python
 # Add to src/app/config.py or override in environment
-{chr(10).join(f"{param.upper()}: {value}" for param, value in best.get('parameters', {}).items())}
+{chr(10).join(f"{param.upper()}: {value}" for param, value in best.get("parameters", {}).items())}
 ```
 
 **Parameter File**: Save to `config/optimized/{opt_config.strategy}_params_{datetime.now().strftime("%Y%m%d")}.json`
@@ -858,14 +854,14 @@ This deployment plan outlines the process for safely rolling out optimized strat
 - Sharpe Ratio ≥ {min_sharpe:.2f} (80% of backtest improvement)
 - Precision (LONG) ≥ {min_precision:.1%} (80% of backtest improvement)
 - Hit Ratio ≥ {min_hit_ratio:.1%} (80% of backtest improvement)
-- Win Rate ≥ {baseline.get('win_rate', 0.0) * 100 * 0.95:.1f}% (95% of baseline)
+- Win Rate ≥ {baseline.get("win_rate", 0.0) * 100 * 0.95:.1f}% (95% of baseline)
 
 ✅ **Statistical Significance**:
 - Minimum 50 trades executed
 - 95% confidence interval overlaps with backtest metrics
 
 ✅ **Risk Controls**:
-- Max Drawdown < {abs(baseline.get('max_drawdown', -0.10)) * 1.2 * 100:.1f}% (120% of baseline)
+- Max Drawdown < {abs(baseline.get("max_drawdown", -0.10)) * 1.2 * 100:.1f}% (120% of baseline)
 - No circuit breaker activations
 - Position sizing within limits
 
@@ -886,7 +882,7 @@ This deployment plan outlines the process for safely rolling out optimized strat
 - Sharpe drops below {min_sharpe * 0.9:.2f}: Warning
 - Precision drops below {min_precision * 0.9:.1%}: Warning
 - Hit ratio drops below {min_hit_ratio * 0.9:.1%}: Critical (pause trading)
-- Drawdown exceeds {abs(baseline.get('max_drawdown', -0.10)) * 1.2 * 100:.1f}%: Critical (halt and rollback)
+- Drawdown exceeds {abs(baseline.get("max_drawdown", -0.10)) * 1.2 * 100:.1f}%: Critical (halt and rollback)
 
 ### Phase 1 Exit Criteria
 
@@ -1020,7 +1016,7 @@ CAPITAL_ALLOCATION_BASELINE = 0.00
 - Sharpe Ratio < {min_sharpe * 0.85:.2f} for 3 consecutive days
 - Precision (LONG) < {min_precision * 0.85:.1%} for 3 consecutive days
 - Hit Ratio < {min_hit_ratio * 0.85:.1%} for 3 consecutive days
-- Drawdown > {abs(baseline.get('max_drawdown', -0.10)) * 1.5 * 100:.1f}% (150% of baseline max)
+- Drawdown > {abs(baseline.get("max_drawdown", -0.10)) * 1.5 * 100:.1f}% (150% of baseline max)
 
 **Warning Alerts** (manual review required):
 - Any metric degrades by >15% from validation period
@@ -1097,7 +1093,7 @@ CAPITAL_ALLOCATION_BASELINE = 0.00
 ### Version Control
 
 - [ ] Tag baseline config: `git tag baseline-{datetime.now().strftime("%Y%m%d")}`
-- [ ] Commit optimized params: `git commit -m "chore: add optimized params from {best['config_id']}"`
+- [ ] Commit optimized params: `git commit -m "chore: add optimized params from {best["config_id"]}"`
 - [ ] Create deployment branch: `git checkout -b deploy/optimized-{datetime.now().strftime("%Y%m%d")}`
 
 ---

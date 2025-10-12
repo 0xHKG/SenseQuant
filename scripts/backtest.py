@@ -360,6 +360,7 @@ def main() -> None:
         else:
             # Use timestamped directory under default path
             from datetime import datetime
+
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             telemetry_dir = Path(settings.telemetry_storage_path) / f"backtest_{timestamp}"
 

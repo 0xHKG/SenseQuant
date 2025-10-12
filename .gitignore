@@ -13,3 +13,4 @@ examples/
 minimal_two_agent_relay/
 release/audit_*/
 release/manifests/
+.vscode/

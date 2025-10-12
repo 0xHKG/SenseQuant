@@ -195,7 +195,9 @@ def generate_manifest(args: argparse.Namespace) -> dict:
             logger.debug(f"  Config: {config_file} (hash: {file_hash[:8]}...)")
 
     # Model files
-    model_files = list(Path("data/models").glob("student*.pkl")) if Path("data/models").exists() else []
+    model_files = (
+        list(Path("data/models").glob("student*.pkl")) if Path("data/models").exists() else []
+    )
     for model_file in model_files:
         file_hash = compute_sha256(model_file)
         backup_path = backup_artifact(model_file, backup_dir)
@@ -279,9 +281,7 @@ def generate_manifest(args: argparse.Namespace) -> dict:
                         f"cp {artifact['backup']} {artifact['path']}"
                     )
 
-        logger.info(
-            f"Rollback plan: restore from {rollback_plan['previous_release_id']}"
-        )
+        logger.info(f"Rollback plan: restore from {rollback_plan['previous_release_id']}")
 
     # Build manifest
     manifest = {
@@ -299,9 +299,7 @@ def generate_manifest(args: argparse.Namespace) -> dict:
         "monitoring": {
             "heightened_period_hours": 48,
             "heightened_start": timestamp.isoformat(),
-            "heightened_end": (
-                timestamp + __import__("datetime").timedelta(hours=48)
-            ).isoformat(),
+            "heightened_end": (timestamp + __import__("datetime").timedelta(hours=48)).isoformat(),
             "alert_thresholds": {
                 "intraday_hit_ratio_drop": 0.05,
                 "swing_precision_drop": 0.05,
@@ -362,18 +360,14 @@ def main() -> int:
         logger.info(f"📄 Manifest: {manifest_path}")
         logger.info(f"💾 Backups: release/backups/{manifest['release_id']}/")
 
-        artifact_counts = {
-            k: len(v) for k, v in manifest["artifacts"].items()
-        }
+        artifact_counts = {k: len(v) for k, v in manifest["artifacts"].items()}
         logger.info(
             f"\n📊 Artifacts: {artifact_counts['configs']} configs, "
             f"{artifact_counts['models']} models, {artifact_counts['notebooks']} notebooks"
         )
 
         if manifest["rollback_plan"]["previous_release_id"]:
-            logger.info(
-                f"\n🔄 Rollback: {manifest['rollback_plan']['previous_release_id']}"
-            )
+            logger.info(f"\n🔄 Rollback: {manifest['rollback_plan']['previous_release_id']}")
         else:
             logger.info("\n⚠️  No previous release found (first deployment)")
 
