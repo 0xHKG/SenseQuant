@@ -114,6 +114,112 @@ def compute_features(df: pd.DataFrame, settings: Settings) -> pd.DataFrame:
     return df
 
 
+def _check_iv_position_sizing(
+    market_features: dict[str, float],
+    settings: Settings,
+) -> tuple[float, dict[str, float | bool]]:
+    """Check IV-based position sizing adjustment (US-029 Phase 3).
+
+    Args:
+        market_features: Market features dictionary
+        settings: Application settings
+
+    Returns:
+        Tuple of (size_multiplier, metadata_dict)
+    """
+    if not settings.swing_iv_position_sizing_enabled:
+        return 1.0, {"enabled": False}
+
+    iv_rank = market_features.get("opt_iv_rank", 50.0)
+    size_multiplier = 1.0
+
+    # Reduce size in elevated volatility
+    if iv_rank > 70:
+        size_multiplier = 0.7  # 30% reduction
+    # Increase size in compressed volatility
+    elif iv_rank < 30:
+        size_multiplier = 1.2  # 20% increase
+
+    return size_multiplier, {
+        "enabled": True,
+        "iv_rank": iv_rank,
+        "size_multiplier": size_multiplier,
+        "adjustment_pct": (size_multiplier - 1.0) * 100,
+    }
+
+
+def _check_macro_correlation_filter(
+    market_features: dict[str, float],
+    settings: Settings,
+) -> tuple[bool, dict[str, float | bool | str]]:
+    """Check macro correlation filtering (US-029 Phase 3).
+
+    Args:
+        market_features: Market features dictionary
+        settings: Application settings
+
+    Returns:
+        Tuple of (passed, metadata_dict)
+    """
+    if not settings.swing_macro_correlation_filter_enabled:
+        return True, {"enabled": False}
+
+    correlation = market_features.get("macro_correlation_nifty", 0.5)
+    beta = market_features.get("macro_beta_nifty", 1.0)
+
+    # Block if low correlation (stock-specific risk)
+    if abs(correlation) < 0.3:
+        return False, {
+            "enabled": True,
+            "passed": False,
+            "reason": "low_correlation",
+            "correlation": correlation,
+            "beta": beta,
+        }
+
+    return True, {
+        "enabled": True,
+        "passed": True,
+        "correlation": correlation,
+        "beta": beta,
+        "high_beta": beta > 1.5,
+    }
+
+
+def _apply_beta_strength_adjustment(
+    strength: float,
+    market_features: dict[str, float],
+    settings: Settings,
+) -> tuple[float, dict[str, float | bool]]:
+    """Apply beta-based strength adjustment (US-029 Phase 3).
+
+    Args:
+        strength: Base signal strength
+        market_features: Market features dictionary
+        settings: Application settings
+
+    Returns:
+        Tuple of (adjusted_strength, metadata_dict)
+    """
+    if not settings.swing_macro_correlation_filter_enabled:
+        return strength, {"enabled": False}
+
+    beta = market_features.get("macro_beta_nifty", 1.0)
+
+    # Reduce strength for high beta stocks (amplified moves)
+    if beta > 1.5:
+        adjusted_strength = strength * 0.8  # 20% reduction
+        return adjusted_strength, {
+            "enabled": True,
+            "beta": beta,
+            "adjustment": -0.2,
+            "original_strength": strength,
+            "adjusted_strength": adjusted_strength,
+        }
+
+    return strength, {"enabled": True, "beta": beta, "adjustment": 0.0}
+
+
 def signal(
     df: pd.DataFrame,
     settings: Settings,
@@ -121,6 +227,7 @@ def signal(
     position: SwingPosition | None = None,
     sentiment_score: float = 0.0,
     sentiment_meta: dict[str, bool | float | str] | None = None,
+    market_features: dict[str, float] | None = None,
 ) -> Signal:
     """
     Generate swing trading signal from feature DataFrame with sentiment gating.
@@ -132,6 +239,10 @@ def signal(
     - SHORT if sma_fast crosses BELOW sma_slow today (yesterday: fast >= slow, today: fast < slow)
       - Suppressed if sentiment > -sentiment_gate_threshold
       - Confidence boosted if sentiment < -sentiment_boost_threshold
+    - Market feature gating (US-029 Phase 3, optional):
+      * Macro correlation filter: block if correlation too low
+      * Beta adjustment: reduce strength for high beta stocks
+      * IV position sizing: adjust position size based on IV rank
     - Otherwise FLAT
 
     Exit Logic (open position):
@@ -145,6 +256,7 @@ def signal(
         position: Current open position (None if no position)
         sentiment_score: Sentiment score [-1.0, 1.0] (default: 0.0 = neutral)
         sentiment_meta: Metadata from sentiment cache (provider, cache_hit, etc.)
+        market_features: Optional market features dict (US-029 Phase 3)
 
     Returns:
         Signal with direction LONG/SHORT/FLAT, strength, and meta with reason
@@ -458,6 +570,34 @@ def signal(
             },
         )
 
+    # US-029 Phase 3: Apply market feature gates (if provided and enabled)
+    feature_checks = {}
+    if market_features is not None and direction != "FLAT":
+        # Check macro correlation filter
+        correlation_passed, correlation_meta = _check_macro_correlation_filter(
+            market_features, settings
+        )
+        feature_checks["macro_correlation"] = correlation_meta
+        if not correlation_passed:
+            logger.info(
+                f"{direction} signal blocked by macro correlation filter",
+                extra={"component": "swing", "correlation_meta": correlation_meta},
+            )
+            direction = "FLAT"
+            strength = 0.0
+            reason = "blocked_by_macro_correlation"
+
+        # Apply beta strength adjustment (if signal still active)
+        if direction != "FLAT":
+            strength, beta_meta = _apply_beta_strength_adjustment(
+                strength, market_features, settings
+            )
+            feature_checks["beta_adjustment"] = beta_meta
+
+        # Check IV position sizing
+        size_multiplier, iv_sizing_meta = _check_iv_position_sizing(market_features, settings)
+        feature_checks["iv_position_sizing"] = iv_sizing_meta
+
     meta = {
         "reason": reason,
         "strategy": "swing",
@@ -467,5 +607,9 @@ def signal(
         "sentiment": sentiment_score,
         "sentiment_source": sentiment_meta.get("provider", "unknown"),
     }
+
+    # Add feature checks if any were performed
+    if feature_checks:
+        meta["feature_checks"] = feature_checks
 
     return Signal(symbol="", direction=direction, strength=strength, meta=meta)

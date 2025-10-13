@@ -66,6 +66,14 @@ class Backtester:
         self.trades: list[dict[str, Any]] = []
         self.positions: dict[str, IntradayPosition | SwingPosition] = {}
 
+        # US-029 Phase 3: Feature usage tracking
+        self.feature_usage_stats: dict[str, dict[str, int]] = {
+            "spread_filter": {"checks": 0, "blocks": 0},
+            "iv_gate": {"checks": 0, "blocks": 0},
+            "macro_regime": {"checks": 0, "blocks": 0},
+            "market_pressure": {"checks": 0, "adjustments": 0},
+        }
+
         # Initialize risk manager
         self._risk_manager = RiskManager(
             starting_capital=config.initial_capital,
@@ -222,6 +230,20 @@ class Backtester:
                         extra={"component": "backtest", "error": str(e)},
                     )
 
+        # US-029 Phase 3: Calculate feature usage rates
+        feature_usage_summary = {}
+        for feature, stats in self.feature_usage_stats.items():
+            if stats["checks"] > 0:
+                block_rate = stats["blocks"] / stats["checks"] if stats["checks"] > 0 else 0.0
+                feature_usage_summary[feature] = {
+                    "checks": stats["checks"],
+                    "blocks": stats["blocks"],
+                    "block_rate": round(block_rate, 4),
+                }
+                # Add adjustments for market_pressure
+                if "adjustments" in stats:
+                    feature_usage_summary[feature]["adjustments"] = stats["adjustments"]
+
         return BacktestResult(
             config=self.config,
             metrics=metrics,
@@ -236,6 +258,7 @@ class Backtester:
                     "trading_fee_bps": self.settings.trading_fee_bps,
                     "slippage_bps": self.settings.slippage_bps,
                 },
+                "feature_usage": feature_usage_summary,  # US-029 Phase 3
             },
             summary_path=summary_path,
             equity_path=equity_path,
@@ -414,6 +437,11 @@ class Backtester:
                     position=swing_position,
                     sentiment_score=0.0,  # No sentiment in backtest
                 )
+
+                # US-029 Phase 3: Track feature usage
+                if sig.meta:
+                    self._track_feature_usage(sig.meta)
+
             except Exception as e:
                 logger.warning(
                     f"Signal generation failed: {e}",
@@ -533,6 +561,10 @@ class Backtester:
             # Generate signal on current data up to this point
             history_df = df.iloc[: idx + 1]
             sig = intraday_signal(history_df, self.settings, sentiment=None)
+
+            # US-029 Phase 3: Track feature usage
+            if sig.meta:
+                self._track_feature_usage(sig.meta)
 
             # Position management logic
             if current_position is None:
@@ -940,6 +972,49 @@ class Backtester:
             f"Opened {direction} position: {symbol} @ {entry_price}",
             extra={"component": "backtest", "symbol": symbol, "qty": qty},
         )
+
+    def _track_feature_usage(self, signal_meta: dict[str, Any]) -> None:
+        """Track feature usage from signal metadata (US-029 Phase 3).
+
+        Args:
+            signal_meta: Signal metadata dict containing feature_checks
+        """
+        if "feature_checks" not in signal_meta:
+            return
+
+        feature_checks = signal_meta["feature_checks"]
+
+        # Track spread filter
+        if "spread_filter" in feature_checks:
+            spread = feature_checks["spread_filter"]
+            if spread.get("enabled"):
+                self.feature_usage_stats["spread_filter"]["checks"] += 1
+                if not spread.get("passed"):
+                    self.feature_usage_stats["spread_filter"]["blocks"] += 1
+
+        # Track IV gate
+        if "iv_gate" in feature_checks:
+            iv = feature_checks["iv_gate"]
+            if iv.get("enabled"):
+                self.feature_usage_stats["iv_gate"]["checks"] += 1
+                if not iv.get("passed"):
+                    self.feature_usage_stats["iv_gate"]["blocks"] += 1
+
+        # Track macro regime
+        if "macro_regime" in feature_checks:
+            macro = feature_checks["macro_regime"]
+            if macro.get("enabled"):
+                self.feature_usage_stats["macro_regime"]["checks"] += 1
+                if not macro.get("passed"):
+                    self.feature_usage_stats["macro_regime"]["blocks"] += 1
+
+        # Track market pressure adjustments
+        if "market_pressure" in feature_checks:
+            pressure = feature_checks["market_pressure"]
+            if pressure.get("enabled"):
+                self.feature_usage_stats["market_pressure"]["checks"] += 1
+                if pressure.get("adjustment", 0) != 0:
+                    self.feature_usage_stats["market_pressure"]["adjustments"] += 1
 
     def _close_swing_position(
         self,

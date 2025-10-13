@@ -333,3 +333,256 @@ def calculate_obv(close: pd.Series, volume: pd.Series) -> pd.Series:
     obv = (direction * volume).cumsum()
 
     return obv
+
+
+# =====================================================================
+# US-029 Phase 2: Market Data Feature Integration
+# =====================================================================
+
+
+def compute_order_book_features(
+    symbol: str,
+    from_date,
+    to_date,
+    lookback_window: int = 60,
+) -> pd.DataFrame:
+    """Compute order book features for symbol/date range (US-029 Phase 2).
+
+    Returns empty DataFrame if no order book data available.
+    Logs warning if data missing.
+
+    Args:
+        symbol: Stock symbol
+        from_date: Start date (datetime)
+        to_date: End date (datetime)
+        lookback_window: Lookback window in seconds
+
+    Returns:
+        DataFrame with order book features, indexed by timestamp
+    """
+    from datetime import datetime
+
+    from loguru import logger
+
+    from src.features.order_book import compute_all_order_book_features
+    from src.services.data_feed import load_order_book_snapshots
+
+    # Convert dates if needed
+    if not isinstance(from_date, datetime):
+        from_date = pd.to_datetime(from_date)
+    if not isinstance(to_date, datetime):
+        to_date = pd.to_datetime(to_date)
+
+    # Load raw data
+    snapshots = load_order_book_snapshots(symbol, from_date, to_date)
+    if not snapshots:
+        logger.warning(f"No order book data for {symbol} ({from_date} to {to_date})")
+        return pd.DataFrame()
+
+    # Convert to DataFrame
+    df = pd.DataFrame(snapshots)
+
+    # Compute features
+    features = compute_all_order_book_features(df, lookback_window)
+
+    return features
+
+
+def compute_options_features(
+    symbol: str,
+    from_date,
+    to_date,
+    iv_lookback_days: int = 30,
+) -> pd.DataFrame:
+    """Compute options features for symbol/date range (US-029 Phase 2).
+
+    Returns empty DataFrame if no options data available.
+
+    Args:
+        symbol: Stock symbol (e.g., "NIFTY", "BANKNIFTY")
+        from_date: Start date (datetime)
+        to_date: End date (datetime)
+        iv_lookback_days: IV lookback period in days
+
+    Returns:
+        DataFrame with options features, indexed by date
+    """
+    from datetime import datetime, timedelta
+
+    from loguru import logger
+
+    from src.features.options import compute_all_options_features
+    from src.services.data_feed import load_options_chain
+
+    # Convert dates if needed
+    if not isinstance(from_date, datetime):
+        from_date = pd.to_datetime(from_date)
+    if not isinstance(to_date, datetime):
+        to_date = pd.to_datetime(to_date)
+
+    # Load options chains for date range
+    all_chains = []
+    current_date = from_date
+
+    while current_date <= to_date:
+        chain = load_options_chain(symbol, current_date)
+        if chain:
+            # Convert chain to DataFrame rows
+            for option in chain.get("options", []):
+                all_chains.append(
+                    {
+                        "date": chain["date"],
+                        "strike": option["strike"],
+                        "expiry": option["expiry"],
+                        "call_iv": option["call"].get("iv", 0),
+                        "put_iv": option["put"].get("iv", 0),
+                        "call_volume": option["call"].get("volume", 0),
+                        "put_volume": option["put"].get("volume", 0),
+                        "call_oi": option["call"].get("oi", 0),
+                        "put_oi": option["put"].get("oi", 0),
+                        "underlying_price": chain["underlying_price"],
+                    }
+                )
+
+        current_date += timedelta(days=1)
+
+    if not all_chains:
+        logger.warning(f"No options data for {symbol} ({from_date} to {to_date})")
+        return pd.DataFrame()
+
+    # Convert to DataFrame
+    chain_df = pd.DataFrame(all_chains)
+    chain_df["date"] = pd.to_datetime(chain_df["date"])
+
+    # Compute features
+    features = compute_all_options_features(chain_df, iv_lookback_days)
+
+    return features
+
+
+def compute_macro_features(
+    indicators: list[str],
+    from_date,
+    to_date,
+    short_window: int = 10,
+    long_window: int = 50,
+) -> pd.DataFrame:
+    """Compute macro features for indicators/date range (US-029 Phase 2).
+
+    Args:
+        indicators: List of macro indicator names
+        from_date: Start date (datetime)
+        to_date: End date (datetime)
+        short_window: Short MA window
+        long_window: Long MA window
+
+    Returns:
+        DataFrame with macro features, indexed by date
+    """
+    from datetime import datetime
+
+    from loguru import logger
+
+    from src.features.macro import compute_all_macro_features
+    from src.services.data_feed import load_macro_data
+
+    # Convert dates if needed
+    if not isinstance(from_date, datetime):
+        from_date = pd.to_datetime(from_date)
+    if not isinstance(to_date, datetime):
+        to_date = pd.to_datetime(to_date)
+
+    # Load macro data for all indicators
+    all_macro_data = []
+
+    for indicator in indicators:
+        df = load_macro_data(indicator, from_date, to_date)
+        if not df.empty:
+            df["indicator"] = indicator
+            all_macro_data.append(df)
+
+    if not all_macro_data:
+        logger.warning(f"No macro data for indicators {indicators}")
+        return pd.DataFrame()
+
+    # Combine all macro data
+    macro_df = pd.concat(all_macro_data, ignore_index=True)
+
+    # Compute features
+    features = compute_all_macro_features(macro_df, short_window, long_window)
+
+    return features
+
+
+def compute_all_market_features(
+    symbol: str,
+    from_date,
+    to_date,
+    include_order_book: bool = False,
+    include_options: bool = False,
+    include_macro: bool = False,
+    macro_indicators: list[str] | None = None,
+) -> pd.DataFrame:
+    """Unified interface to compute all available market features (US-029 Phase 2).
+
+    Args:
+        symbol: Stock symbol
+        from_date: Start date
+        to_date: End date
+        include_order_book: Whether to include order book features
+        include_options: Whether to include options features
+        include_macro: Whether to include macro features
+        macro_indicators: List of macro indicators (if None, uses defaults)
+
+    Returns:
+        DataFrame with all enabled market features
+    """
+    from loguru import logger
+
+    features_dict = {}
+
+    # Order book features
+    if include_order_book:
+        ob_features = compute_order_book_features(symbol, from_date, to_date)
+        if not ob_features.empty:
+            features_dict["order_book"] = ob_features
+            logger.info(f"Loaded {len(ob_features)} order book feature rows")
+
+    # Options features
+    if include_options:
+        opt_features = compute_options_features(symbol, from_date, to_date)
+        if not opt_features.empty:
+            features_dict["options"] = opt_features
+            logger.info(f"Loaded {len(opt_features)} options feature rows")
+
+    # Macro features
+    if include_macro:
+        if macro_indicators is None:
+            macro_indicators = ["NIFTY50", "INDIAVIX", "USDINR"]
+
+        macro_features = compute_macro_features(macro_indicators, from_date, to_date)
+        if not macro_features.empty:
+            features_dict["macro"] = macro_features
+            logger.info(f"Loaded {len(macro_features)} macro feature rows")
+
+    # Merge all features
+    if not features_dict:
+        logger.warning("No market features available")
+        return pd.DataFrame()
+
+    # Start with first available feature set
+    combined = None
+    for _feature_type, features in features_dict.items():
+        if combined is None:
+            combined = features
+        else:
+            # Join on index (timestamp or date)
+            combined = combined.join(features, how="outer")
+
+    # Fill NaN with forward/backward fill
+    if combined is not None:
+        combined = combined.ffill().bfill()
+
+    logger.info(f"Computed {len(combined)} total market feature rows")
+
+    return combined if combined is not None else pd.DataFrame()

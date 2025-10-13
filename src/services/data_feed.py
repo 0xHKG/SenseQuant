@@ -656,3 +656,217 @@ def create_data_feed(settings: Settings, breeze_client: BreezeClient | None = No
         raise ValueError(
             f"Invalid data_feed_source: {source}. Must be 'csv', 'breeze', or 'hybrid'"
         )
+
+
+# =====================================================================
+# US-029: Market Data Loaders (Order Book, Options, Macro)
+# =====================================================================
+
+
+def load_order_book_snapshots(
+    symbol: str,
+    from_date: datetime,
+    to_date: datetime,
+    base_dir: str | Path = "data/order_book",
+) -> list[dict]:
+    """Load cached order book snapshots from disk (US-029).
+
+    Args:
+        symbol: Stock symbol
+        from_date: Start date (inclusive)
+        to_date: End date (inclusive)
+        base_dir: Base directory for order book data
+
+    Returns:
+        List of order book snapshot dictionaries, sorted by timestamp
+
+    Example:
+        >>> snapshots = load_order_book_snapshots("RELIANCE", from_date, to_date)
+        >>> for snap in snapshots:
+        ...     print(snap["timestamp"], snap["bids"][0]["price"])
+    """
+    base_path = Path(base_dir) / symbol
+
+    if not base_path.exists():
+        logger.warning(
+            f"Order book directory not found: {base_path}",
+            extra={"symbol": symbol, "base_dir": str(base_dir)},
+        )
+        return []
+
+    snapshots = []
+
+    # Iterate through date directories
+    current_date = from_date
+    while current_date <= to_date:
+        date_str = current_date.strftime("%Y-%m-%d")
+        date_dir = base_path / date_str
+
+        if date_dir.exists() and date_dir.is_dir():
+            # Load all JSON snapshots in this date directory
+            for snapshot_file in sorted(date_dir.glob("*.json")):
+                try:
+                    with open(snapshot_file) as f:
+                        snapshot = json.load(f)
+                        snapshots.append(snapshot)
+                except Exception as e:
+                    logger.error(
+                        f"Failed to load order book snapshot: {snapshot_file}: {e}",
+                        extra={"file": str(snapshot_file), "error": str(e)},
+                    )
+
+        current_date += timedelta(days=1)
+
+    logger.info(
+        f"Loaded {len(snapshots)} order book snapshots",
+        extra={
+            "symbol": symbol,
+            "from_date": from_date.strftime("%Y-%m-%d"),
+            "to_date": to_date.strftime("%Y-%m-%d"),
+            "count": len(snapshots),
+        },
+    )
+
+    return snapshots
+
+
+def load_options_chain(
+    symbol: str,
+    date: datetime,
+    base_dir: str | Path = "data/options",
+) -> dict | None:
+    """Load cached options chain from disk (US-029).
+
+    Args:
+        symbol: Stock symbol (e.g., "NIFTY", "BANKNIFTY")
+        date: Date for options chain
+        base_dir: Base directory for options data
+
+    Returns:
+        Options chain dictionary, or None if not found
+
+    Example:
+        >>> chain = load_options_chain("NIFTY", datetime(2025, 1, 15))
+        >>> if chain:
+        ...     print(f"Underlying: {chain['underlying_price']}")
+        ...     for option in chain['options']:
+        ...         print(option['strike'], option['call']['iv'])
+    """
+    date_str = date.strftime("%Y-%m-%d")
+    chain_file = Path(base_dir) / symbol / f"{date_str}.json"
+
+    if not chain_file.exists():
+        logger.warning(
+            f"Options chain file not found: {chain_file}",
+            extra={"symbol": symbol, "date": date_str, "file": str(chain_file)},
+        )
+        return None
+
+    try:
+        with open(chain_file) as f:
+            chain = json.load(f)
+
+        logger.info(
+            f"Loaded options chain: {symbol} {date_str}",
+            extra={
+                "symbol": symbol,
+                "date": date_str,
+                "strikes": len(chain.get("options", [])),
+            },
+        )
+
+        return chain
+
+    except Exception as e:
+        logger.error(
+            f"Failed to load options chain: {chain_file}: {e}",
+            extra={"file": str(chain_file), "error": str(e)},
+        )
+        return None
+
+
+def load_macro_data(
+    indicator: str,
+    from_date: datetime,
+    to_date: datetime,
+    base_dir: str | Path = "data/macro",
+) -> pd.DataFrame:
+    """Load cached macro economic indicator data from disk (US-029).
+
+    Args:
+        indicator: Macro indicator name (e.g., "NIFTY50", "INDIAVIX", "USDINR")
+        from_date: Start date (inclusive)
+        to_date: End date (inclusive)
+        base_dir: Base directory for macro data
+
+    Returns:
+        DataFrame with columns: date, value, change, change_pct
+        Empty DataFrame if no data found
+
+    Example:
+        >>> df = load_macro_data("NIFTY50", from_date, to_date)
+        >>> print(df[['date', 'value', 'change_pct']])
+    """
+    indicator_dir = Path(base_dir) / indicator
+
+    if not indicator_dir.exists():
+        logger.warning(
+            f"Macro data directory not found: {indicator_dir}",
+            extra={"indicator": indicator, "base_dir": str(base_dir)},
+        )
+        return pd.DataFrame()
+
+    data_points = []
+
+    # Iterate through date range
+    current_date = from_date
+    while current_date <= to_date:
+        date_str = current_date.strftime("%Y-%m-%d")
+        data_file = indicator_dir / f"{date_str}.json"
+
+        if data_file.exists():
+            try:
+                with open(data_file) as f:
+                    data = json.load(f)
+                    data_points.append(
+                        {
+                            "date": data["date"],
+                            "value": data["value"],
+                            "change": data["change"],
+                            "change_pct": data["change_pct"],
+                        }
+                    )
+            except Exception as e:
+                logger.error(
+                    f"Failed to load macro data: {data_file}: {e}",
+                    extra={"file": str(data_file), "error": str(e)},
+                )
+
+        current_date += timedelta(days=1)
+
+    if not data_points:
+        logger.warning(
+            f"No macro data found for {indicator}",
+            extra={
+                "indicator": indicator,
+                "from_date": from_date.strftime("%Y-%m-%d"),
+                "to_date": to_date.strftime("%Y-%m-%d"),
+            },
+        )
+        return pd.DataFrame()
+
+    df = pd.DataFrame(data_points)
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").reset_index(drop=True)
+
+    logger.info(
+        f"Loaded {len(df)} macro data points",
+        extra={
+            "indicator": indicator,
+            "from_date": from_date.strftime("%Y-%m-%d"),
+            "to_date": to_date.strftime("%Y-%m-%d"),
+            "count": len(df),
+        },
+    )
+
+    return df

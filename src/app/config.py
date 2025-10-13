@@ -607,6 +607,195 @@ class Settings(BaseSettings):  # type: ignore[misc]
         False, validation_alias="DATA_QUALITY_DASHBOARD_ENABLED"
     )  # Enable Streamlit dashboard (requires streamlit package)
 
+    # =====================================================================
+    # US-029: Order Book, Options, and Macro Data Integration (Phase 1)
+    # =====================================================================
+
+    # Order Book Configuration
+    order_book_enabled: bool = Field(
+        False, validation_alias="ORDER_BOOK_ENABLED"
+    )  # Enable order book depth snapshot ingestion (disabled by default)
+    order_book_provider: str = Field(
+        "stub", validation_alias="ORDER_BOOK_PROVIDER"
+    )  # Order book data provider: "stub", "breeze", "websocket"
+    order_book_endpoint: str = Field(
+        "", validation_alias="ORDER_BOOK_ENDPOINT"
+    )  # Provider API endpoint URL
+    order_book_depth_levels: int = Field(
+        5, validation_alias="ORDER_BOOK_DEPTH_LEVELS", ge=1, le=20
+    )  # Number of price levels to capture (best 1-20 levels)
+    order_book_snapshot_interval_seconds: int = Field(
+        60, validation_alias="ORDER_BOOK_SNAPSHOT_INTERVAL_SECONDS", ge=1, le=3600
+    )  # Snapshot interval in seconds (1s to 1h)
+    order_book_retention_days: int = Field(
+        7, validation_alias="ORDER_BOOK_RETENTION_DAYS", ge=1, le=90
+    )  # Retention period in days
+    order_book_retry_limit: int = Field(
+        3, validation_alias="ORDER_BOOK_RETRY_LIMIT", ge=1, le=10
+    )  # Maximum retry attempts for failed fetches
+    order_book_retry_backoff_seconds: int = Field(
+        2, validation_alias="ORDER_BOOK_RETRY_BACKOFF_SECONDS", ge=1, le=60
+    )  # Base backoff delay for exponential retry (seconds)
+    order_book_output_dir: str = Field(
+        "data/order_book", validation_alias="ORDER_BOOK_OUTPUT_DIR"
+    )  # Output directory for order book snapshots
+
+    # Options Chain Configuration
+    options_enabled: bool = Field(
+        False, validation_alias="OPTIONS_ENABLED"
+    )  # Enable options chain data ingestion (disabled by default)
+    options_provider: str = Field(
+        "stub", validation_alias="OPTIONS_PROVIDER"
+    )  # Options data provider: "stub", "breeze", "nse"
+    options_endpoint: str = Field(
+        "", validation_alias="OPTIONS_ENDPOINT"
+    )  # Provider API endpoint URL
+    options_refresh_interval_hours: int = Field(
+        24, validation_alias="OPTIONS_REFRESH_INTERVAL_HOURS", ge=1, le=168
+    )  # Refresh interval in hours (1h to 7 days)
+    options_retention_days: int = Field(
+        30, validation_alias="OPTIONS_RETENTION_DAYS", ge=1, le=365
+    )  # Retention period in days
+    options_retry_limit: int = Field(
+        3, validation_alias="OPTIONS_RETRY_LIMIT", ge=1, le=10
+    )  # Maximum retry attempts
+    options_retry_backoff_seconds: int = Field(
+        2, validation_alias="OPTIONS_RETRY_BACKOFF_SECONDS", ge=1, le=60
+    )  # Base backoff delay for exponential retry (seconds)
+    options_output_dir: str = Field(
+        "data/options", validation_alias="OPTIONS_OUTPUT_DIR"
+    )  # Output directory for options chain data
+
+    # Macro Economic Data Configuration
+    macro_enabled: bool = Field(
+        False, validation_alias="MACRO_ENABLED"
+    )  # Enable macro economic data ingestion (disabled by default)
+    macro_provider: str = Field(
+        "stub", validation_alias="MACRO_PROVIDER"
+    )  # Macro data provider: "stub", "yfinance", "rbi"
+    macro_endpoint: str = Field("", validation_alias="MACRO_ENDPOINT")  # Provider API endpoint URL
+    macro_indicators: list[str] = Field(
+        default=["NIFTY50", "INDIAVIX", "USDINR", "IN10Y"],
+        validation_alias="MACRO_INDICATORS",
+    )  # List of macro indicators to fetch
+    macro_refresh_interval_hours: int = Field(
+        24, validation_alias="MACRO_REFRESH_INTERVAL_HOURS", ge=1, le=168
+    )  # Refresh interval in hours (1h to 7 days)
+    macro_retention_days: int = Field(
+        90, validation_alias="MACRO_RETENTION_DAYS", ge=1, le=730
+    )  # Retention period in days (up to 2 years)
+    macro_retry_limit: int = Field(
+        3, validation_alias="MACRO_RETRY_LIMIT", ge=1, le=10
+    )  # Maximum retry attempts
+    macro_retry_backoff_seconds: int = Field(
+        2, validation_alias="MACRO_RETRY_BACKOFF_SECONDS", ge=1, le=60
+    )  # Base backoff delay for exponential retry (seconds)
+    macro_output_dir: str = Field(
+        "data/macro", validation_alias="MACRO_OUTPUT_DIR"
+    )  # Output directory for macro indicator data
+
+    # =====================================================================
+    # US-029 Phase 2: Feature Engineering Configuration
+    # =====================================================================
+
+    # Feature Engineering Toggles (disabled by default)
+    enable_order_book_features: bool = Field(
+        False, validation_alias="ENABLE_ORDER_BOOK_FEATURES"
+    )  # Enable order book feature computation
+    enable_options_features: bool = Field(
+        False, validation_alias="ENABLE_OPTIONS_FEATURES"
+    )  # Enable options feature computation
+    enable_macro_features: bool = Field(
+        False, validation_alias="ENABLE_MACRO_FEATURES"
+    )  # Enable macro feature computation
+
+    # Feature Computation Parameters
+    order_book_feature_lookback_seconds: int = Field(
+        60, validation_alias="ORDER_BOOK_FEATURE_LOOKBACK_SECONDS", ge=1, le=600
+    )  # Lookback window for order book time-weighted features
+    options_feature_iv_lookback_days: int = Field(
+        30, validation_alias="OPTIONS_FEATURE_IV_LOOKBACK_DAYS", ge=1, le=365
+    )  # Lookback days for IV percentile calculation
+    macro_feature_correlation_window: int = Field(
+        30, validation_alias="MACRO_FEATURE_CORRELATION_WINDOW", ge=1, le=365
+    )  # Window for macro correlation features
+    macro_feature_short_window: int = Field(
+        10, validation_alias="MACRO_FEATURE_SHORT_WINDOW", ge=1, le=100
+    )  # Short MA window for macro momentum
+    macro_feature_long_window: int = Field(
+        50, validation_alias="MACRO_FEATURE_LONG_WINDOW", ge=1, le=500
+    )  # Long MA window for macro momentum
+
+    # =====================================================================
+    # US-029 Phase 3: Strategy Feature Integration (all disabled by default)
+    # =====================================================================
+
+    # Intraday Strategy Feature Gates
+    intraday_spread_filter_enabled: bool = Field(
+        False, validation_alias="INTRADAY_SPREAD_FILTER_ENABLED"
+    )  # Enable order book spread filter
+    intraday_max_spread_pct: float = Field(
+        0.5, validation_alias="INTRADAY_MAX_SPREAD_PCT", ge=0.01, le=5.0
+    )  # Max allowed spread percentage (block if exceeded)
+    intraday_market_pressure_adjustment_enabled: bool = Field(
+        False, validation_alias="INTRADAY_MARKET_PRESSURE_ADJUSTMENT_ENABLED"
+    )  # Enable signal strength adjustment based on market pressure
+    intraday_iv_adjustment_enabled: bool = Field(
+        False, validation_alias="INTRADAY_IV_ADJUSTMENT_ENABLED"
+    )  # Enable IV-based signal gating
+    intraday_macro_regime_filter_enabled: bool = Field(
+        False, validation_alias="INTRADAY_MACRO_REGIME_FILTER_ENABLED"
+    )  # Enable macro regime filtering
+
+    # Swing Strategy Feature Gates
+    swing_iv_position_sizing_enabled: bool = Field(
+        False, validation_alias="SWING_IV_POSITION_SIZING_ENABLED"
+    )  # Enable IV-based position size adjustment
+    swing_macro_correlation_filter_enabled: bool = Field(
+        False, validation_alias="SWING_MACRO_CORRELATION_FILTER_ENABLED"
+    )  # Enable macro correlation filtering
+
+    # Optimizer Feature Testing
+    optimizer_test_feature_combinations: bool = Field(
+        False, validation_alias="OPTIMIZER_TEST_FEATURE_COMBINATIONS"
+    )  # Include feature toggles in optimizer parameter grid
+
+    # =====================================================================
+    # US-029 Phase 5: Real-Time Streaming Configuration
+    # =====================================================================
+
+    # Streaming Master Control
+    streaming_enabled: bool = Field(
+        False, validation_alias="STREAMING_ENABLED"
+    )  # Master switch for real-time streaming (disabled by default)
+
+    # Streaming Buffer Configuration
+    streaming_buffer_size: int = Field(
+        100, validation_alias="STREAMING_BUFFER_SIZE", ge=10, le=1000
+    )  # Max snapshots to buffer per symbol (circular buffer)
+
+    streaming_update_interval_seconds: int = Field(
+        1, validation_alias="STREAMING_UPDATE_INTERVAL_SECONDS", ge=1, le=60
+    )  # Update frequency for streaming snapshots (seconds)
+
+    # Streaming Monitoring & Health
+    streaming_heartbeat_timeout_seconds: int = Field(
+        30, validation_alias="STREAMING_HEARTBEAT_TIMEOUT_SECONDS", ge=5, le=300
+    )  # Heartbeat timeout for streaming health alerts (seconds)
+
+    streaming_max_consecutive_errors: int = Field(
+        10, validation_alias="STREAMING_MAX_CONSECUTIVE_ERRORS", ge=1, le=100
+    )  # Max consecutive errors before alerting
+
+    # Background Ingestion (Daemon Mode)
+    background_ingestion_enabled: bool = Field(
+        False, validation_alias="BACKGROUND_INGESTION_ENABLED"
+    )  # Enable background daemon ingestion (disabled by default)
+
+    background_ingestion_interval_seconds: int = Field(
+        300, validation_alias="BACKGROUND_INGESTION_INTERVAL_SECONDS", ge=60, le=3600
+    )  # Interval for background fetch loops (5 min default)
+
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore", case_sensitive=False
     )

@@ -131,11 +131,177 @@ def compute_features(df: pd.DataFrame, settings: Settings) -> pd.DataFrame:
     return df
 
 
+def _check_spread_filter(
+    market_features: dict[str, float],
+    settings: Settings,
+) -> tuple[bool, dict[str, float | bool]]:
+    """Check if order book spread is acceptable (US-029 Phase 3).
+
+    Args:
+        market_features: Market features dictionary
+        settings: Application settings
+
+    Returns:
+        Tuple of (passed, metadata_dict)
+    """
+    if not settings.intraday_spread_filter_enabled:
+        return True, {"enabled": False}
+
+    spread_pct = market_features.get("ob_spread_pct", 0.0)
+    passed = spread_pct <= settings.intraday_max_spread_pct
+
+    return passed, {
+        "enabled": True,
+        "passed": passed,
+        "spread_pct": spread_pct,
+        "threshold": settings.intraday_max_spread_pct,
+    }
+
+
+def _check_iv_gate(
+    market_features: dict[str, float],
+    settings: Settings,
+    direction: SignalDirection,
+) -> tuple[bool, dict[str, float | bool | str]]:
+    """Check IV-based gating rules (US-029 Phase 3).
+
+    Args:
+        market_features: Market features dictionary
+        settings: Application settings
+        direction: Signal direction to check
+
+    Returns:
+        Tuple of (passed, metadata_dict)
+    """
+    if not settings.intraday_iv_adjustment_enabled:
+        return True, {"enabled": False}
+
+    iv_percentile = market_features.get("opt_iv_percentile", 50.0)
+    skew = market_features.get("opt_skew_put_call", 0.0)
+
+    # Block LONG in high IV, SHORT in low IV
+    if direction == "LONG" and iv_percentile > 80:
+        return False, {
+            "enabled": True,
+            "passed": False,
+            "reason": "iv_too_high",
+            "iv_percentile": iv_percentile,
+            "skew": skew,
+        }
+    if direction == "SHORT" and iv_percentile < 20:
+        return False, {
+            "enabled": True,
+            "passed": False,
+            "reason": "iv_too_low",
+            "iv_percentile": iv_percentile,
+            "skew": skew,
+        }
+
+    return True, {"enabled": True, "passed": True, "iv_percentile": iv_percentile, "skew": skew}
+
+
+def _check_macro_regime(
+    market_features: dict[str, float],
+    settings: Settings,
+    direction: SignalDirection,
+) -> tuple[bool, dict[str, float | bool | str]]:
+    """Check macro regime gating rules (US-029 Phase 3).
+
+    Args:
+        market_features: Market features dictionary
+        settings: Application settings
+        direction: Signal direction to check
+
+    Returns:
+        Tuple of (passed, metadata_dict)
+    """
+    if not settings.intraday_macro_regime_filter_enabled:
+        return True, {"enabled": False}
+
+    trend_regime = market_features.get("macro_trend_regime", 0)
+    vol_regime = market_features.get("macro_volatility_regime", 1)
+
+    # Block LONG in downtrend, SHORT in uptrend
+    if direction == "LONG" and trend_regime == -1:
+        return False, {
+            "enabled": True,
+            "passed": False,
+            "reason": "macro_downtrend",
+            "trend_regime": trend_regime,
+            "vol_regime": vol_regime,
+        }
+    if direction == "SHORT" and trend_regime == 1:
+        return False, {
+            "enabled": True,
+            "passed": False,
+            "reason": "macro_uptrend",
+            "trend_regime": trend_regime,
+            "vol_regime": vol_regime,
+        }
+
+    # Block all in high volatility regime
+    if vol_regime == 2:
+        return False, {
+            "enabled": True,
+            "passed": False,
+            "reason": "high_volatility_regime",
+            "trend_regime": trend_regime,
+            "vol_regime": vol_regime,
+        }
+
+    return True, {
+        "enabled": True,
+        "passed": True,
+        "trend_regime": trend_regime,
+        "vol_regime": vol_regime,
+    }
+
+
+def _apply_market_pressure_adjustment(
+    strength: float,
+    market_features: dict[str, float],
+    settings: Settings,
+    direction: SignalDirection,
+) -> tuple[float, dict[str, float | bool]]:
+    """Apply market pressure-based signal strength adjustment (US-029 Phase 3).
+
+    Args:
+        strength: Base signal strength
+        market_features: Market features dictionary
+        settings: Application settings
+        direction: Signal direction
+
+    Returns:
+        Tuple of (adjusted_strength, metadata_dict)
+    """
+    if not settings.intraday_market_pressure_adjustment_enabled:
+        return strength, {"enabled": False}
+
+    pressure = market_features.get("ob_market_pressure", 0.0)
+    adjustment = 0.0
+
+    if direction == "LONG" and pressure > 0:
+        adjustment = min(0.2, pressure / 1000.0)
+    elif direction == "SHORT" and pressure < 0:
+        adjustment = min(0.2, -pressure / 1000.0)
+
+    adjusted_strength = min(1.0, strength + adjustment)
+
+    return adjusted_strength, {
+        "enabled": True,
+        "pressure": pressure,
+        "adjustment": adjustment,
+        "original_strength": strength,
+        "adjusted_strength": adjusted_strength,
+    }
+
+
 def signal(
     df: pd.DataFrame,
     settings: Settings,
     *,
     sentiment: float | None = None,
+    market_features: dict[str, float] | None = None,
 ) -> Signal:
     """
     Generate intraday trading signal from feature DataFrame.
@@ -146,12 +312,18 @@ def signal(
     - Sentiment gating:
       * Block LONG if sentiment < SENTIMENT_NEG_LIMIT
       * Block SHORT if sentiment > SENTIMENT_POS_LIMIT
+    - Market feature gating (US-029 Phase 3, optional):
+      * Spread filter: block if spread too wide
+      * IV gate: block LONG if IV too high, SHORT if IV too low
+      * Macro regime: block LONG in downtrend, SHORT in uptrend, all in high vol
+      * Market pressure: adjust signal strength based on order book pressure
     - Otherwise FLAT
 
     Args:
         df: DataFrame with computed features (from compute_features)
         settings: Application settings with thresholds
         sentiment: Sentiment score in [-1.0, 1.0] or None (default 0.0)
+        market_features: Optional market features dict (US-029 Phase 3)
 
     Returns:
         Signal with direction LONG/SHORT/FLAT and strength
@@ -223,6 +395,54 @@ def signal(
             strength = 0.7
             reason = "short_sma_rsi_sentiment_ok"
 
+    # US-029 Phase 3: Apply market feature gates (if provided and enabled)
+    feature_checks = {}
+    if market_features is not None and direction != "FLAT":
+        # Check spread filter first (blocks all signals if spread too wide)
+        spread_passed, spread_meta = _check_spread_filter(market_features, settings)
+        feature_checks["spread_filter"] = spread_meta
+        if not spread_passed:
+            logger.info(
+                f"{direction} signal blocked by spread filter",
+                extra={"component": "intraday", "spread_meta": spread_meta},
+            )
+            direction = "FLAT"
+            strength = 0.0
+            reason = "blocked_by_spread_filter"
+
+        # Check IV gate
+        if direction != "FLAT":
+            iv_passed, iv_meta = _check_iv_gate(market_features, settings, direction)
+            feature_checks["iv_gate"] = iv_meta
+            if not iv_passed:
+                logger.info(
+                    f"{direction} signal blocked by IV gate",
+                    extra={"component": "intraday", "iv_meta": iv_meta},
+                )
+                direction = "FLAT"
+                strength = 0.0
+                reason = f"blocked_by_iv_gate: {iv_meta.get('reason', 'unknown')}"
+
+        # Check macro regime
+        if direction != "FLAT":
+            macro_passed, macro_meta = _check_macro_regime(market_features, settings, direction)
+            feature_checks["macro_regime"] = macro_meta
+            if not macro_passed:
+                logger.info(
+                    f"{direction} signal blocked by macro regime",
+                    extra={"component": "intraday", "macro_meta": macro_meta},
+                )
+                direction = "FLAT"
+                strength = 0.0
+                reason = f"blocked_by_macro_regime: {macro_meta.get('reason', 'unknown')}"
+
+        # Apply market pressure adjustment (if signal still active)
+        if direction != "FLAT":
+            strength, pressure_meta = _apply_market_pressure_adjustment(
+                strength, market_features, settings, direction
+            )
+            feature_checks["market_pressure"] = pressure_meta
+
     # Build meta snapshot
     meta = {
         "close": close,
@@ -231,6 +451,10 @@ def signal(
         "sentiment": sentiment_val,
         "reason": reason,
     }
+
+    # Add feature checks if any were performed
+    if feature_checks:
+        meta["feature_checks"] = feature_checks
 
     logger.info(
         f"Signal generated: {direction}",

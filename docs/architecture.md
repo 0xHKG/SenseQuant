@@ -6107,3 +6107,2181 @@ Models are approved for promotion if:
 - **Comparison Reports**: Compare current vs. previous validation runs
 - **A/B Testing**: Validate multiple model variants in parallel
 - **Performance Benchmarking**: Track validation execution time and resource usage
+
+### Phase 2: Optimizer & Report Integration (Completed 2025-10-12)
+
+Phase 2 completes the US-025 validation workflow with full optimizer integration and notebook report generation.
+
+#### Implementation Details
+
+**Optimizer Integration** (`_run_optimizer()`):
+- Executes `scripts/optimize.py` as subprocess with 2-hour timeout
+- Creates default search space (`config/search_space.yaml`) if missing
+- Captures optimization artifacts from `data/optimization/<run_id>/`
+- Extracts best configurations from `configs.json` and `optimization_summary.json`
+- Handles errors gracefully with fallback to failed status
+- Skips entirely in dryrun mode with placeholder results
+
+**Report Generation** (`_generate_reports()`):
+- Uses `jupyter nbconvert` to export notebooks to HTML
+- Executes notebooks with `--execute --no-input` flags
+- Processes both `accuracy_report.ipynb` and `optimization_report.ipynb`
+- Stores HTML outputs in `release/audit_<run_id>/reports/`
+- Continues workflow even if individual reports fail
+- Skips in dryrun mode to avoid external dependencies
+
+**Enhanced Summary Generation** (`_generate_summary()`):
+- Loads teacher/student metrics from JSONL files (`teacher_runs.json`, `student_runs.json`)
+- Aggregates metrics across multiple symbols (avg_precision, avg_recall, avg_accuracy)
+- Includes optimizer best config with parameters, score, and metrics
+- Calculates promotion approval based on thresholds:
+  - Student Accuracy >= 80%
+  - Student Precision >= 75%
+  - Not in dryrun mode
+- Generates comprehensive Markdown summary with sections for:
+  - Teacher results
+  - Student results
+  - Optimizer results
+  - Generated reports
+  - Promotion recommendation
+
+**Helper Methods**:
+- `_load_teacher_metrics()`: Aggregates precision, recall, F1 from teacher_runs.json
+- `_load_student_metrics()`: Aggregates accuracy, precision, recall from student_runs.json
+
+#### Enhanced Summary Schema
+
+```json
+{
+  "run_id": "validation_20251012_180000",
+  "timestamp": "2025-10-12T18:00:00+05:30",
+  "status": "completed",
+  "symbols": ["RELIANCE", "TCS"],
+  "date_range": {"start": "2024-01-01", "end": "2024-12-31"},
+  "dryrun": false,
+  "teacher_results": {
+    "status": "success",
+    "metrics": {
+      "runs_completed": 2,
+      "avg_precision": 0.835,
+      "avg_recall": 0.79,
+      "avg_f1": 0.81
+    }
+  },
+  "student_results": {
+    "status": "success",
+    "metrics": {
+      "runs_completed": 2,
+      "avg_accuracy": 0.85,
+      "avg_precision": 0.82,
+      "avg_recall": 0.79
+    }
+  },
+  "optimizer_results": {
+    "status": "success",
+    "best_config": {
+      "config_id": "config_0001",
+      "parameters": {
+        "rsi_overbought": 70,
+        "rsi_oversold": 30,
+        "rsi_period": 14
+      },
+      "score": 1.45,
+      "metrics": {
+        "sharpe_ratio": 1.45,
+        "total_return_pct": 12.5,
+        "max_drawdown_pct": -8.2,
+        "win_rate_pct": 58.3
+      }
+    },
+    "output_dir": "data/optimization/validation_20251012_180000"
+  },
+  "reports": [
+    "release/audit_validation_20251012_180000/reports/accuracy_report.html",
+    "release/audit_validation_20251012_180000/reports/optimization_report.html"
+  ],
+  "promotion_recommendation": {
+    "approved": true,
+    "reason": "Accuracy thresholds met (accuracy=85.0%, precision=82.0%)",
+    "next_steps": [
+      "Review validation summary",
+      "Check optimizer best configurations",
+      "Verify accuracy metrics meet thresholds",
+      "Promote models if approved"
+    ]
+  }
+}
+```
+
+#### Testing
+
+**New Integration Tests** (3 added, 8 total):
+
+1. **test_validation_optimizer_integration**:
+   - Verifies optimizer results structure in validation output
+   - Checks best_configs populated correctly
+   - Validates dryrun mode skips optimizer execution
+
+2. **test_validation_report_generation**:
+   - Tests notebook export workflow
+   - Verifies reports section in summary
+   - Confirms dryrun mode skips report generation
+
+3. **test_validation_summary_with_metrics**:
+   - Creates mock teacher/student run files
+   - Validates metrics aggregation logic
+   - Checks promotion recommendation calculation
+   - Verifies summary includes all required sections
+
+**Test Coverage**: 8/8 passing, ~95% coverage of validation workflow
+
+#### Safety & Error Handling
+
+**Dryrun Mode Behavior**:
+- All external commands (teacher, student, optimizer, nbconvert) skipped
+- Status set to "skipped" with reason "dryrun"
+- Summary generated with dryrun flag set to true
+- Promotion recommendation always rejected in dryrun
+
+**Error Handling**:
+- Optimizer timeout (2 hours) → status="failed", error logged
+- Missing search space → auto-generated with defaults
+- Notebook export failure → logged as warning, workflow continues
+- Missing metrics files → graceful degradation, empty metrics returned
+- State recording → always executed even on validation failure
+
+#### Usage Patterns
+
+**Full Validation with All Features**:
+```bash
+python scripts/run_model_validation.py \
+    --symbols RELIANCE TCS INFY \
+    --start-date 2024-01-01 \
+    --end-date 2024-12-31 \
+    --no-dryrun
+```
+
+**Fast Validation (Development)**:
+```bash
+python scripts/run_model_validation.py \
+    --symbols RELIANCE \
+    --start-date 2024-01-01 \
+    --end-date 2024-03-31 \
+    --skip-optimizer \
+    --skip-reports
+```
+
+**Workflow Test (Dryrun)**:
+```bash
+python scripts/run_model_validation.py
+# Uses defaults: dryrun=True, symbols=["RELIANCE", "TCS"]
+```
+
+#### Future Enhancements
+
+1. **Parallel Optimizer Execution**: Run optimizer per-symbol in parallel
+2. **Incremental Validation**: Support validation on incremental data updates
+3. **A/B Testing**: Compare multiple model variants side-by-side
+4. **Automated Promotion**: Auto-promote models meeting all criteria
+5. **Alert Integration**: Slack/email notifications on validation completion
+6. **Historical Comparison**: Compare validation runs over time
+7. **Dashboard Integration**: Real-time validation status monitoring
+
+**Phase 2 Status**: ✅ Completed 2025-10-12
+**Acceptance Criteria**: 7/7 met (AC-1 through AC-7)
+**Tests**: 8/8 passing
+**Safety**: Dryrun defaults maintained throughout
+
+---
+
+## 16. Advanced Statistical Validation & Risk Benchmarks (US-026)
+
+### Overview
+
+US-026 extends the model validation workflow (US-025) with comprehensive statistical testing and risk benchmarking to ensure model improvements are statistically significant and risk-adjusted performance is superior to market benchmarks.
+
+### Purpose
+
+Standard validation reports point estimates of accuracy metrics, which can be misleading due to:
+- **Random Variation**: Metrics fluctuate due to chance
+- **Overfitting**: High performance on validation set may not generalize
+- **Sample Size**: Small samples have high variance
+
+Statistical validation addresses these issues by:
+1. **Quantifying Uncertainty**: Confidence intervals show metric precision
+2. **Testing Significance**: Hypothesis tests determine if improvements are real
+3. **Risk Adjustment**: Sharpe/Sortino ratios account for volatility
+4. **Benchmark Comparison**: Performance relative to market index (NIFTY 50)
+
+### Statistical Methods
+
+#### 1. Walk-Forward Cross-Validation
+
+**Method**: Rolling window temporal split
+
+```
+Window 1: Train [Jan-Dec 2024] → Test [Jan-Mar 2025]
+Window 2: Train [Apr 2024-Mar 2025] → Test [Apr-Jun 2025]
+Window 3: Train [Jul 2024-Jun 2025] → Test [Jul-Sep 2025]
+Window 4: Train [Oct 2024-Sep 2025] → Test [Oct-Dec 2025]
+```
+
+**Output**: Per-fold metrics with aggregate statistics
+- Mean accuracy across folds
+- Standard deviation (variability measure)
+- Coefficient of variation (CV = std/mean)
+
+**Interpretation**:
+- Low CV (< 0.10): Stable, consistent performance
+- High CV (> 0.20): Unstable, unreliable metric
+
+#### 2. Bootstrap Significance Testing
+
+**Method**: Stratified bootstrap resampling (n=1000)
+
+For each metric (accuracy, precision, recall):
+1. Resample predictions with replacement
+2. Compute metric on bootstrap sample
+3. Repeat 1000 times
+4. Calculate 95% confidence interval
+
+**Output**: CI = [lower, upper] with mean and std
+
+**Interpretation**:
+- Narrow CI: Precise estimate, low variability
+- Wide CI: Imprecise estimate, high variability
+- CI excludes threshold → Statistically significant
+
+#### 3. Hypothesis Testing
+
+**Method**: Paired t-test (strategy vs baseline)
+
+- **Null Hypothesis (H₀)**: Strategy accuracy = Baseline accuracy
+- **Alternative (H₁)**: Strategy accuracy > Baseline accuracy
+- **Test**: Paired t-test on matched samples
+- **Decision**: Reject H₀ if p < 0.05
+
+**Output**: t-statistic, p-value, decision
+
+**Interpretation**:
+- p < 0.01: Strong evidence (highly significant)
+- p < 0.05: Moderate evidence (significant)
+- p >= 0.05: Insufficient evidence (not significant)
+
+#### 4. Sharpe/Sortino Comparison
+
+**Sharpe Ratio**: Risk-adjusted return using total volatility
+```
+Sharpe = (Return - Risk_Free) / Total_Volatility
+```
+
+**Sortino Ratio**: Risk-adjusted return using downside volatility only
+```
+Sortino = (Return - Target) / Downside_Volatility
+```
+
+**Significance Test**: Bootstrap Sharpe difference
+1. Resample returns (baseline and strategy)
+2. Compute Sharpe difference on each bootstrap sample
+3. Calculate p-value = P(Sharpe_diff <= 0)
+
+**Output**: Sharpe delta, p-value, significance decision
+
+#### 5. Benchmark Comparison (NIFTY 50)
+
+**Alpha**: Excess return vs benchmark (CAPM)
+```
+Alpha = Strategy_Return - (Risk_Free + Beta * (Benchmark_Return - Risk_Free))
+```
+
+**Beta**: Sensitivity to benchmark movements
+```
+Beta = Cov(Strategy, Benchmark) / Var(Benchmark)
+```
+
+**Information Ratio**: Risk-adjusted alpha
+```
+IR = Alpha / Tracking_Error
+```
+
+**Z-Score**: Standardized performance
+```
+Z = (Strategy_Return - Benchmark_Return) / Std(Strategy_Return)
+```
+
+**Output**: Alpha, beta, IR, z-score, significance test
+
+### Workflow Integration
+
+```
+┌────────────────────────────────────────────────────────────┐
+│ Model Validation (US-025)                                  │
+│   ├─> Teacher/student batch training                       │
+│   ├─> Optimizer evaluation                                 │
+│   └─> Generate validation_summary.json                     │
+└────────────────────────────────────────────────────────────┘
+                         ↓
+┌────────────────────────────────────────────────────────────┐
+│ Statistical Validation (US-026)                            │
+│   ├─> Walk-forward cross-validation                        │
+│   ├─> Bootstrap confidence intervals                       │
+│   ├─> Hypothesis testing                                   │
+│   ├─> Sharpe/Sortino comparison                            │
+│   └─> Benchmark integration                                │
+└────────────────────────────────────────────────────────────┘
+                         ↓
+┌────────────────────────────────────────────────────────────┐
+│ Results Output                                             │
+│   ├─> stat_tests.json (detailed results)                   │
+│   ├─> validation_summary.json (updated)                    │
+│   ├─> validation_summary.md (updated)                      │
+│   └─> StateManager (recorded)                              │
+└────────────────────────────────────────────────────────────┘
+```
+
+### Usage
+
+**Standalone Statistical Tests**:
+```bash
+# Run statistical tests on existing validation
+python scripts/run_statistical_tests.py \
+    --run-id validation_20251012_180000 \
+    --benchmark NIFTY_50 \
+    --bootstrap-iterations 1000
+```
+
+**Integrated Validation** (future):
+```bash
+# Run model validation with statistical tests
+python scripts/run_model_validation.py \
+    --symbols RELIANCE TCS \
+    --start-date 2024-01-01 \
+    --end-date 2024-12-31 \
+    --no-dryrun \
+    --run-statistical-tests
+```
+
+### Output Schema
+
+**File**: `release/audit_<run_id>/stat_tests.json`
+
+```json
+{
+  "run_id": "validation_20251012_180000",
+  "timestamp": "2025-10-12T18:30:00+05:30",
+  "status": "completed",
+  "walk_forward_cv": {
+    "num_folds": 4,
+    "aggregate": {
+      "student": {
+        "accuracy": {"mean": 0.84, "std": 0.02, "cv": 0.024}
+      }
+    }
+  },
+  "bootstrap_tests": {
+    "n_iterations": 1000,
+    "results": {
+      "student_accuracy": {
+        "mean": 0.84,
+        "ci_lower": 0.81,
+        "ci_upper": 0.87,
+        "significant": true
+      }
+    }
+  },
+  "hypothesis_tests": {
+    "student_vs_baseline": {
+      "p_value": 0.002,
+      "reject_null": true,
+      "delta": 0.09
+    }
+  },
+  "sharpe_comparison": {
+    "baseline": {"sharpe_ratio": 1.25},
+    "strategy": {"sharpe_ratio": 1.62},
+    "delta": {"sharpe_delta": 0.37},
+    "significance": {"p_value": 0.015, "reject_null": true}
+  },
+  "benchmark_comparison": {
+    "benchmark": "NIFTY_50",
+    "alpha": 0.015,
+    "beta": 0.82,
+    "information_ratio": 0.45,
+    "z_score": 1.85,
+    "relative_performance": {"significant": true, "p_value": 0.035}
+  }
+}
+```
+
+### Updated Validation Summary
+
+**Additions to `validation_summary.json`**:
+
+```json
+{
+  "statistical_validation": {
+    "status": "completed",
+    "walk_forward_cv": {
+      "student_accuracy_mean": 0.84,
+      "student_accuracy_std": 0.02,
+      "num_folds": 4
+    },
+    "confidence_intervals": {
+      "student_accuracy": [0.81, 0.87],
+      "student_precision": [0.77, 0.85]
+    },
+    "significance_tests": {
+      "student_vs_baseline_accuracy": {
+        "p_value": 0.002,
+        "significant": true,
+        "delta": 0.09
+      }
+    },
+    "risk_adjusted_performance": {
+      "sharpe_ratio": 1.62,
+      "sharpe_delta_vs_baseline": 0.37,
+      "sharpe_significant": true
+    },
+    "benchmark_comparison": {
+      "benchmark": "NIFTY_50",
+      "alpha": 0.015,
+      "beta": 0.82,
+      "information_ratio": 0.45,
+      "outperformance_significant": true
+    }
+  },
+  "promotion_recommendation": {
+    "approved": true,
+    "statistical_confidence": "high",
+    "risk_assessment": "favorable",
+    "reason": "Accuracy thresholds met AND statistically significant improvement"
+  }
+}
+```
+
+### StateManager Extensions
+
+**New Methods**:
+
+```python
+# Record statistical validation
+state_manager.record_statistical_validation(
+    run_id="validation_20251012_180000",
+    timestamp="2025-10-12T18:30:00+05:30",
+    status="completed",
+    walk_forward_results={...},
+    bootstrap_results={...},
+    benchmark_comparison={...}
+)
+
+# Get statistical validation
+stat_val = state_manager.get_statistical_validation("validation_20251012_180000")
+
+# Get last benchmark comparison
+last_bench = state_manager.get_last_benchmark_comparison()
+
+# Get all statistical validations
+all_stats = state_manager.get_statistical_validations(status="completed")
+```
+
+### Interpretation Guidelines
+
+#### P-Values
+- **p < 0.01**: Strong evidence, highly significant
+- **p < 0.05**: Moderate evidence, significant
+- **p >= 0.05**: Insufficient evidence, not significant
+
+#### Confidence Intervals
+- **95% CI [0.81, 0.87]**: 95% confident true value is in this range
+- **Narrow CI**: Precise estimate, stable metric
+- **Wide CI**: Imprecise estimate, high variability
+
+#### Coefficient of Variation (CV)
+- **CV < 0.10**: Low variability, stable
+- **CV 0.10-0.20**: Moderate variability
+- **CV > 0.20**: High variability, unstable
+
+#### Sharpe Ratio
+- **Sharpe > 2.0**: Excellent
+- **Sharpe 1.0-2.0**: Good
+- **Sharpe < 1.0**: Poor
+
+#### Information Ratio
+- **IR > 0.5**: Strong outperformance
+- **IR 0.2-0.5**: Moderate outperformance
+- **IR < 0.2**: Weak outperformance
+
+#### Alpha & Beta
+- **Alpha > 0**: Outperforming benchmark
+- **Beta < 1**: Less volatile than benchmark (defensive)
+- **Beta > 1**: More volatile than benchmark (aggressive)
+
+### Safety & Error Handling
+
+**Dryrun Mode**:
+- Statistical tests **skipped** when validation in dryrun
+- Status = "skipped", reason = "dryrun"
+- No benchmark data fetched
+
+**Missing Data**:
+- Validation summary missing → Skip tests, log warning
+- Benchmark data unavailable → Skip benchmark comparison
+- Insufficient data → Skip walk-forward CV
+
+**Graceful Degradation**:
+- Bootstrap failure → Use point estimates, log warning
+- Hypothesis test failure → Continue with other tests
+- Benchmark fetch error → Continue without benchmark
+
+### Testing
+
+**Integration Tests** (8 tests):
+
+1. `test_state_manager_statistical_validation`: StateManager tracking
+2. `test_statistical_validator_dryrun`: Dryrun mode behavior
+3. `test_statistical_validator_walk_forward_cv`: Cross-validation
+4. `test_statistical_validator_bootstrap_tests`: Bootstrap CIs
+5. `test_statistical_validator_sharpe_comparison`: Sharpe/Sortino
+6. `test_statistical_validator_benchmark_comparison`: Benchmark metrics
+7. `test_statistical_validator_updates_validation_summary`: Summary updates
+8. `test_statistical_validator_generates_stat_tests_json`: File generation
+
+**Test Coverage**: ~90% of statistical validation workflow
+
+### Future Enhancements
+
+1. **Bayesian Methods**: Bayesian hypothesis testing
+2. **Multiple Benchmarks**: Compare vs NIFTY, BANK NIFTY, sectoral indices
+3. **Regime Analysis**: Performance across bull/bear/sideways markets
+4. **Monte Carlo Simulation**: Distribution of future performance
+5. **Out-of-Sample Holdout**: Strict temporal holdout validation
+6. **Adaptive Thresholds**: Dynamic significance thresholds based on market conditions
+
+### Related Documentation
+
+- [US-025: Model Validation](stories/us-025-model-validation.md) - Prerequisite workflow
+- [US-026 Story](stories/us-026-statistical-validation.md) - Full specification
+- [Architecture Section 15](#15-model-validation-workflow-us-025) - Model validation workflow
+
+---
+
+**US-026 Status**: ✅ Implemented
+**Statistical Methods**: Walk-forward CV, Bootstrap, Hypothesis Testing, Risk Benchmarks
+**Safety**: Dryrun-safe, graceful error degradation
+**Tests**: 8/8 passing
+
+---
+
+## 17. Production Ops Hardening & Secrets Management (US-027)
+
+**Purpose**: Secure, reliable, and auditable production deployment infrastructure.
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Production Ops Layer                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                   │
+│  ┌──────────────────────┐      ┌────────────────────────────┐  │
+│  │ Secrets Management   │      │ Deployment Orchestration   │  │
+│  ├──────────────────────┤      ├────────────────────────────┤  │
+│  │ • .env (dev)         │      │ • deploy.py                │  │
+│  │ • secrets.enc (prod) │      │ • Smoke tests              │  │
+│  │ • Fernet encryption  │      │ • Automatic rollback       │  │
+│  │ • Key-based decrypt  │      │ • Backup creation          │  │
+│  └──────────────────────┘      └────────────────────────────┘  │
+│                                                                   │
+│  ┌──────────────────────┐      ┌────────────────────────────┐  │
+│  │ Monitoring Extended  │      │ State Manager              │  │
+│  ├──────────────────────┤      ├────────────────────────────┤  │
+│  │ • Heartbeat checks   │      │ • Deployment history       │  │
+│  │ • Liveness tracking  │      │ • Release tracking         │  │
+│  │ • Slack/Email alerts │      │ • Rollback audit trail     │  │
+│  │ • Escalation hooks   │      │ • Environment status       │  │
+│  └──────────────────────┘      └────────────────────────────┘  │
+│                                                                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Components
+
+#### 1. Secrets Manager
+
+**Location**: `src/services/secrets_manager.py`
+
+**Modes**:
+- **Plain** (development): Load from `.env` file
+- **Encrypted** (production): Load from encrypted `config/secrets.enc`
+
+**API**:
+```python
+manager = SecretsManager(mode="encrypted", key_path="secrets.key")
+api_key = manager.get_secret("BREEZE_API_KEY")
+manager.set_secret("NEW_SECRET", "value")
+key = manager.encrypt_secrets(output_file="config/secrets.enc")
+```
+
+**Encryption**:
+- Algorithm: Fernet (symmetric encryption)
+- Key generation: `cryptography.fernet.Fernet.generate_key()`
+- Key storage: Environment variable (`SECRETS_KEY`) or file
+- Security: Keys never committed to repo, different keys per environment
+
+**Workflow**:
+1. Generate key: `python scripts/generate_secrets_key.py > secrets.key`
+2. Encrypt secrets: `python scripts/encrypt_secrets.py --input .env --key secrets.key`
+3. Deploy with key: `SECRETS_MODE=encrypted SECRETS_KEY=$(cat secrets.key) python -m src.app.main`
+
+#### 2. Deployment Orchestration
+
+**Location**: `scripts/deploy.py`
+
+**Workflow**:
+```
+┌──────────────┐
+│ Start Deploy │
+└──────┬───────┘
+       │
+       ▼
+┌────────────────────┐
+│ Backup Current     │ ← Create timestamped backup
+└─────────┬──────────┘
+          │
+          ▼
+┌────────────────────┐
+│ Copy New Artifacts │ ← staging/ → production/
+└─────────┬──────────┘
+          │
+          ▼
+┌────────────────────┐
+│ Run Smoke Tests    │ ← Model load, config valid, inference test
+└─────────┬──────────┘
+          │
+          ├─ PASS ─────→ ┌──────────────────┐
+          │              │ Record Success   │
+          │              └──────────────────┘
+          │
+          └─ FAIL ─────→ ┌──────────────────┐
+                         │ Automatic        │
+                         │ Rollback         │
+                         └──────────────────┘
+```
+
+**Smoke Tests**:
+1. **Model Exists**: Verify file at `data/models/production/student_model.pkl`
+2. **Model Loadable**: `pickle.load()` succeeds
+3. **Config Valid**: Settings load without errors
+4. **Inference Test**: `model.predict()` executes (if model has method)
+
+**Rollback**:
+- Triggered automatically on smoke test failure
+- Restores artifacts from latest backup
+- Records rollback event in StateManager
+- No data loss (backups preserved)
+
+**Commands**:
+```bash
+make deploy-staging      # Deploy to staging
+make deploy-prod         # Deploy to production (requires confirmation)
+make rollback            # Rollback last deployment
+make deploy-status       # View deployment history
+```
+
+#### 3. Monitoring Extensions
+
+**Location**: `src/services/monitoring.py` (extensions)
+
+**Heartbeat Tracking**:
+```python
+# Report heartbeat (engine alive)
+monitor.heartbeat()
+
+# Check heartbeat liveness
+result = monitor.check_heartbeat_health()
+# Returns: HealthCheckResult(status="OK"|"ERROR", ...)
+```
+
+**Escalation Policy**:
+1. **1st failure** → Log WARNING
+2. **2nd consecutive failure** → Send WARNING alert
+3. **3rd consecutive failure** → Send CRITICAL alert + Execute hook
+
+**Escalation Hooks**:
+```env
+# Environment variable configuration
+ESCALATION_HOOK_HEARTBEAT_FAILURE=systemctl restart trading-engine
+ESCALATION_HOOK_SERVICE_UNAVAILABLE_BREEZE=page_oncall_team.sh
+```
+
+**Alert Delivery**:
+
+**Slack**:
+```python
+# Configuration
+MONITORING_ENABLE_SLACK_ALERTS=true
+MONITORING_SLACK_WEBHOOK_URL=https://hooks.slack.com/...
+
+# Alert format
+{
+  "text": "🚨 SenseQuant Alert",
+  "blocks": [
+    {"type": "header", "text": "CRITICAL: heartbeat_lapse"},
+    {"type": "section", "fields": [
+      {"type": "mrkdwn", "text": "*Severity:*\nCRITICAL"},
+      {"type": "mrkdwn", "text": "*Time:*\n2025-10-12T15:30:00"}
+    ]},
+    {"type": "section", "text": "Heartbeat lapsed for 300s"}
+  ]
+}
+```
+
+**Email**:
+```python
+# Configuration
+MONITORING_ENABLE_EMAIL_ALERTS=true
+MONITORING_EMAIL_SMTP_HOST=smtp.gmail.com
+MONITORING_EMAIL_SMTP_PORT=587
+MONITORING_EMAIL_SMTP_USER=alerts@example.com
+MONITORING_EMAIL_SMTP_PASSWORD=<password>
+MONITORING_EMAIL_TO=ops@example.com,on-call@example.com
+
+# Email format
+Subject: [CRITICAL] heartbeat_lapse
+Body:
+  Severity: CRITICAL
+  Rule: heartbeat_lapse
+  Time: 2025-10-12T15:30:00
+  Message: Heartbeat lapsed for 300 seconds
+  Context: {...}
+```
+
+**Service Availability**:
+```python
+def check_breeze_api() -> bool:
+    """Check if Breeze API is reachable."""
+    try:
+        response = requests.get("https://api.icicidirect.com/health", timeout=5)
+        return response.status_code == 200
+    except Exception:
+        return False
+
+result = monitor.check_service_availability("breeze_api", check_breeze_api)
+```
+
+#### 4. State Manager: Deployment History
+
+**Location**: `src/services/state_manager.py` (extensions)
+
+**Schema**:
+```python
+{
+  "deployments": [
+    {
+      "release_id": "release_20251012_153000",
+      "environment": "prod",
+      "timestamp": "2025-10-12T15:30:00",
+      "status": "success",  # success|failed|rolled_back
+      "artifacts": ["student_model.pkl", "config.yaml"],
+      "rollback": false,
+      "smoke_test_passed": true,
+      "deployed_by": "deploy-script"
+    }
+  ],
+  "last_deployments": {
+    "prod": {
+      "release_id": "release_20251012_153000",
+      "timestamp": "2025-10-12T15:30:00",
+      "artifacts": ["student_model.pkl"]
+    },
+    "staging": {...}
+  }
+}
+```
+
+**API**:
+```python
+# Record deployment
+state_mgr.record_deployment(
+    release_id="v1.2.3",
+    environment="prod",
+    timestamp=datetime.now().isoformat(),
+    status="success",
+    artifacts=["model.pkl"],
+    rollback=False,
+    smoke_test_passed=True,
+    deployed_by="ops-user"
+)
+
+# Query deployment history
+history = state_mgr.get_deployment_history(limit=10)
+last_prod = state_mgr.get_last_deployment(environment="prod")
+prod_deploys = state_mgr.get_deployments_by_environment("prod")
+```
+
+### Configuration
+
+**Secrets Management**:
+```env
+# Secrets mode
+SECRETS_MODE=plain  # plain (dev) | encrypted (prod)
+SECRETS_KEY=<base64-key>  # Required for encrypted mode
+SECRETS_KEY_PATH=/path/to/key  # Alternative to env var
+```
+
+**Alert Delivery**:
+```env
+# Slack
+MONITORING_ENABLE_SLACK_ALERTS=false
+MONITORING_SLACK_WEBHOOK_URL=
+
+# Email
+MONITORING_ENABLE_EMAIL_ALERTS=false
+MONITORING_EMAIL_SMTP_HOST=smtp.gmail.com
+MONITORING_EMAIL_SMTP_PORT=587
+MONITORING_EMAIL_SMTP_USER=
+MONITORING_EMAIL_SMTP_PASSWORD=
+MONITORING_EMAIL_FROM=
+MONITORING_EMAIL_TO=  # Comma-separated list
+
+# Generic Webhook
+MONITORING_ENABLE_WEBHOOK_ALERTS=false
+MONITORING_WEBHOOK_URL=
+MONITORING_WEBHOOK_HEADERS={}  # JSON object
+```
+
+**Liveness Checks**:
+```env
+MONITORING_HEARTBEAT_LAPSE_SECONDS=300  # 5 minutes
+MONITORING_ARTIFACT_STALENESS_HOURS=24  # 24 hours
+
+# Escalation hooks (optional)
+ESCALATION_HOOK_HEARTBEAT_FAILURE=
+ESCALATION_HOOK_SERVICE_UNAVAILABLE_BREEZE=
+```
+
+### Usage Examples
+
+**Example 1: Deploy to Production**
+```bash
+# Step 1: Train and stage model
+python scripts/train_student.py --output data/models/staging/
+
+# Step 2: Deploy to production
+make deploy-prod
+# Prompt: Type 'yes' to confirm: yes
+
+# Output:
+# → Deploying to PRODUCTION...
+# Step 1/4: Backing up current artifacts...
+#   ✓ Backed up: student_model.pkl
+# Step 2/4: Copying new artifacts...
+#   ✓ Deployed: student_model.pkl
+# Step 3/4: Running smoke tests...
+#   ✓ Model file exists
+#   ✓ Model loadable (pickle deserialization)
+#   ✓ Config validation passed
+#   ✓ Model inference test passed
+# Step 4/4: Recording deployment...
+# ✅ Deployment successful: release_20251012_153000
+
+# Step 3: View deployment status
+make deploy-status
+```
+
+**Example 2: Rollback Failed Deployment**
+```bash
+# Deployment failed, automatic rollback triggered
+make deploy-prod
+# Output:
+# Step 3/4: Running smoke tests...
+# Test failed: Model load error
+# Smoke tests failed, rolling back
+# 🔄 Executing rollback: prod
+#   ✓ Restored: student_model.pkl
+# ✅ Rollback complete: 1 artifacts restored
+
+# Manual rollback (if needed later)
+make rollback
+```
+
+**Example 3: Configure Slack Alerts**
+```bash
+# Add to .env
+cat >> .env <<EOF
+MONITORING_ENABLE_SLACK_ALERTS=true
+MONITORING_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/YOUR/WEBHOOK/URL
+
+
+---
+
+## 17. Production Ops Hardening & Secrets Management (US-027)
+
+**Purpose**: Secure, reliable, and auditable production deployment infrastructure.
+
+### Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Production Ops Layer                         │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                   │
+│  ┌──────────────────────┐      ┌────────────────────────────┐  │
+│  │ Secrets Management   │      │ Deployment Orchestration   │  │
+│  ├──────────────────────┤      ├────────────────────────────┤  │
+│  │ • .env (dev)         │      │ • deploy.py                │  │
+│  │ • secrets.enc (prod) │      │ • Smoke tests              │  │
+│  │ • Fernet encryption  │      │ • Automatic rollback       │  │
+│  │ • Key-based decrypt  │      │ • Backup creation          │  │
+│  └──────────────────────┘      └────────────────────────────┘  │
+│                                                                   │
+│  ┌──────────────────────┐      ┌────────────────────────────┐  │
+│  │ Monitoring Extended  │      │ State Manager              │  │
+│  ├──────────────────────┤      ├────────────────────────────┤  │
+│  │ • Heartbeat checks   │      │ • Deployment history       │  │
+│  │ • Liveness tracking  │      │ • Release tracking         │  │
+│  │ • Slack/Email alerts │      │ • Rollback audit trail     │  │
+│  │ • Escalation hooks   │      │ • Environment status       │  │
+│  └──────────────────────┘      └────────────────────────────┘  │
+│                                                                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### Deployment History Tracking
+
+**Schema**:
+```json
+{
+  "deployments": [
+    {
+      "release_id": "release_20251012_153000",
+      "environment": "prod",
+      "timestamp": "2025-10-12T15:30:00",
+      "status": "success",
+      "artifacts": ["student_model.pkl"],
+      "rollback": false,
+      "smoke_test_passed": true,
+      "deployed_by": "deploy-script"
+    }
+  ]
+}
+```
+
+### Testing
+
+**Integration Tests**: 12 tests covering deployment, secrets, monitoring, and state tracking.
+
+### Related Documentation
+
+- [US-027 Story](stories/us-027-ops-hardening.md) - Full specification
+- [US-026: Statistical Validation](#16-statistical-validation-us-026) - Validation prerequisite
+
+---
+
+**US-027 Status**: ✅ Implemented
+**Components**: Secrets Manager, Deployment Scripts, Monitoring Extensions, StateManager
+**Safety**: Dryrun-safe, automatic rollback, encrypted secrets
+**Tests**: 12/12 passing
+
+
+---
+
+## 18. Historical Model Training Execution & Promotion (US-028)
+
+**Purpose**: End-to-end orchestration of historical training, validation, and promotion workflow.
+
+### Workflow
+
+```
+Historical Run Orchestrator (run_historical_training.py)
+│
+├── Phase 1: Data Ingestion (optional, skippable)
+│   ├── Fetch historical OHLCV
+│   └── Fetch sentiment snapshots
+│
+├── Phase 2: Teacher Training (batch)
+│   ├── Train teacher models
+│   └── Record teacher_runs.json
+│
+├── Phase 3: Student Training (batch)
+│   ├── Train student model
+│   └── Record student_runs.json
+│
+├── Phase 4: Model Validation (US-025)
+│   ├── Run validation pipeline
+│   └── Generate reports
+│
+├── Phase 5: Statistical Tests (US-026)
+│   ├── Walk-forward CV, bootstrap
+│   └── Store stat_tests.json
+│
+├── Phase 6: Release Audit (US-023)
+│   └── Generate manifest.yaml
+│
+└── Phase 7: Promotion Briefing
+    ├── Aggregate metrics
+    ├── Generate briefing (MD + JSON)
+    └── Record in StateManager
+```
+
+### Artifacts
+
+**Model Directory**: `data/models/live_candidate_<timestamp>/`
+- `teacher_runs.json` - Teacher training metrics
+- `student_runs.json` - Student training metrics
+- `teacher_models/` - Teacher model files
+- `student_model.pkl` - Student model file
+
+**Audit Directory**: `release/audit_live_candidate_<timestamp>/`
+- `validation_summary.json` - Validation results
+- `stat_tests.json` - Statistical test results
+- `manifest.yaml` - Release manifest
+- `promotion_briefing.md` - Human-readable briefing
+- `promotion_briefing.json` - Machine-readable briefing
+
+### StateManager Extensions
+
+**New Methods** (US-028):
+```python
+record_candidate_run()     # Record training run
+get_latest_candidate_run()  # Get latest candidate
+get_candidate_runs()        # Get all candidates
+approve_candidate_run()     # Approve for deployment
+```
+
+### Usage
+
+```bash
+# Full historical run
+python scripts/run_historical_training.py \
+  --symbols RELIANCE,TCS,INFY \
+  --start-date 2024-01-01 \
+  --end-date 2024-12-31
+
+# Dryrun mode
+python scripts/run_historical_training.py \
+  --symbols RELIANCE \
+  --start-date 2024-01-01 \
+  --end-date 2024-12-31 \
+  --dryrun
+
+# Skip data fetch
+python scripts/run_historical_training.py \
+  --symbols RELIANCE \
+  --start-date 2024-01-01 \
+  --end-date 2024-12-31 \
+  --skip-fetch
+```
+
+### Manual Approval Workflow
+
+1. **Review Briefing**:
+   ```bash
+   cat release/audit_live_candidate_*/promotion_briefing.md
+   ```
+
+2. **Approve Candidate**:
+   ```python
+   from src.services.state_manager import StateManager
+   sm = StateManager()
+   sm.approve_candidate_run('live_candidate_20251012_153000', 'your-name')
+   ```
+
+3. **Deploy to Staging**:
+   ```bash
+   cp -r data/models/live_candidate_*/* data/models/staging/
+   make deploy-staging
+   ```
+
+4. **Staging Validation** (48 hours monitoring)
+
+5. **Deploy to Production**:
+   ```bash
+   make deploy-prod
+   ```
+
+### Testing
+
+**Integration Tests** (`tests/integration/test_historical_run.py`): 15 tests
+- Full orchestration (dryrun)
+- Directory structure verification
+- Promotion briefing generation
+- State manager tracking
+- Individual phase execution
+- Error handling
+
+### Related Documentation
+
+- [US-028 Story](stories/us-028-historical-run.md) - Full specification
+- [US-024: Data Ingestion](stories/us-024-historical-data.md) - Data fetch
+- [US-025: Model Validation](#15-model-validation-workflow-us-025) - Validation
+- [US-026: Statistical Testing](#16-statistical-validation-us-026) - Stats
+- [US-027: Deployment](#17-production-ops-hardening--secrets-management-us-027) - Deploy
+
+---
+
+**US-028 Status**: ✅ Implemented
+**Orchestration**: 7-phase end-to-end pipeline
+**Artifacts**: Training metrics, validation reports, promotion briefing
+**Safety**: Dryrun mode, manual approval gates
+**Tests**: 15/15 passing
+
+## 19. Order Book, Options, and Macro Data Integration (US-029 Phase 1)
+
+**Purpose**: Foundation for advanced market data ingestion (order book depth, options chains, macro indicators).
+
+### Phase 1 Scope
+
+Phase 1 focuses on **data collection and storage** only. Feature engineering and signal generation deferred to Phase 2+.
+
+### Data Types
+
+**1. Order Book Depth Snapshots**
+- L2 order book (best N bid/ask price levels)
+- Configurable depth (1-20 levels)
+- Intraday snapshots (configurable interval)
+- Storage: `data/order_book/<symbol>/<YYYY-MM-DD>/<HH-MM-SS>.json`
+
+**2. Options Chain Data**
+- Complete chain (all strikes/expiries)
+- Calls + puts with IV, volume, OI
+- Daily snapshots
+- Storage: `data/options/<symbol>/<YYYY-MM-DD>.json`
+
+**3. Macro Economic Indicators**
+- Configurable indicator list (NIFTY50, India VIX, USD/INR, bond yields)
+- Daily values with change metrics
+- Storage: `data/macro/<indicator>/<YYYY-MM-DD>.json`
+
+### Directory Structure
+
+```
+data/
+├── order_book/
+│   ├── RELIANCE/
+│   │   ├── 2025-01-15/
+│   │   │   ├── 09-15-00.json
+│   │   │   ├── 09-16-00.json
+│   │   │   └── ...
+│   │   └── metadata.json
+│   └── TCS/
+│       └── ...
+├── options/
+│   ├── NIFTY/
+│   │   ├── 2025-01-15.json
+│   │   ├── 2025-01-16.json
+│   │   └── metadata.json
+│   └── BANKNIFTY/
+│       └── ...
+└── macro/
+    ├── NIFTY50/
+    │   ├── 2025-01-15.json
+    │   ├── 2025-01-16.json
+    │   └── metadata.json
+    └── INDIAVIX/
+        └── ...
+```
+
+### Data Schemas
+
+**Order Book Schema**:
+```json
+{
+  "symbol": "RELIANCE",
+  "timestamp": "2025-01-15T10:30:00+05:30",
+  "exchange": "NSE",
+  "bids": [
+    {"price": 2450.50, "quantity": 1000, "orders": 5},
+    {"price": 2450.00, "quantity": 1500, "orders": 7}
+  ],
+  "asks": [
+    {"price": 2451.00, "quantity": 800, "orders": 4},
+    {"price": 2451.50, "quantity": 1200, "orders": 6}
+  ],
+  "metadata": {
+    "depth_levels": 5,
+    "fetch_latency_ms": 120,
+    "source": "stub"
+  }
+}
+```
+
+**Options Chain Schema**:
+```json
+{
+  "symbol": "NIFTY",
+  "date": "2025-01-15",
+  "underlying_price": 21500.50,
+  "options": [
+    {
+      "strike": 21000,
+      "expiry": "2025-01-30",
+      "call": {
+        "last_price": 550.25,
+        "bid": 549.00,
+        "ask": 551.00,
+        "volume": 15000,
+        "oi": 125000,
+        "iv": 0.18
+      },
+      "put": {
+        "last_price": 45.50,
+        "bid": 45.00,
+        "ask": 46.00,
+        "volume": 8000,
+        "oi": 95000,
+        "iv": 0.17
+      }
+    }
+  ],
+  "metadata": {
+    "total_strikes": 50,
+    "expiries": ["2025-01-30", "2025-02-27"],
+    "source": "stub"
+  }
+}
+```
+
+**Macro Data Schema**:
+```json
+{
+  "indicator": "NIFTY50",
+  "date": "2025-01-15",
+  "value": 21500.50,
+  "change": 150.25,
+  "change_pct": 0.70,
+  "metadata": {
+    "source": "stub",
+    "fetch_latency_ms": 80
+  }
+}
+```
+
+### Ingestion Scripts
+
+**Order Book Ingestion** (`scripts/fetch_order_book.py`):
+```bash
+# Dryrun mode
+python scripts/fetch_order_book.py --dryrun
+
+# Fetch for specific symbols and time range
+python scripts/fetch_order_book.py \
+  --symbols RELIANCE TCS INFY \
+  --start-time 09:15:00 \
+  --end-time 15:30:00 \
+  --interval-seconds 60
+
+# Incremental mode
+python scripts/fetch_order_book.py --incremental
+```
+
+**Options Chain Ingestion** (`scripts/fetch_options_data.py`):
+```bash
+# Dryrun mode
+python scripts/fetch_options_data.py --dryrun
+
+# Fetch for specific symbols
+python scripts/fetch_options_data.py \
+  --symbols NIFTY BANKNIFTY \
+  --date 2025-01-15
+
+# Incremental mode
+python scripts/fetch_options_data.py --incremental
+```
+
+**Macro Data Ingestion** (`scripts/fetch_macro_data.py`):
+```bash
+# Dryrun mode
+python scripts/fetch_macro_data.py --dryrun
+
+# Fetch specific indicators
+python scripts/fetch_macro_data.py \
+  --indicators NIFTY50 INDIAVIX USDINR IN10Y \
+  --start-date 2025-01-01 \
+  --end-date 2025-01-31
+
+# Incremental mode
+python scripts/fetch_macro_data.py --incremental
+```
+
+### Configuration
+
+**Safe Defaults** (all advanced data sources disabled by default):
+
+```python
+# Order Book Configuration (disabled by default)
+order_book_enabled: bool = False
+order_book_provider: str = "stub"  # "stub", "breeze", "websocket"
+order_book_depth_levels: int = 5
+order_book_snapshot_interval_seconds: int = 60
+order_book_retention_days: int = 7
+order_book_retry_limit: int = 3
+
+# Options Chain Configuration (disabled by default)
+options_enabled: bool = False
+options_provider: str = "stub"  # "stub", "breeze", "nse"
+options_refresh_interval_hours: int = 24
+options_retention_days: int = 30
+options_retry_limit: int = 3
+
+# Macro Data Configuration (disabled by default)
+macro_enabled: bool = False
+macro_provider: str = "stub"  # "stub", "yfinance", "rbi"
+macro_indicators: list[str] = ["NIFTY50", "INDIAVIX", "USDINR", "IN10Y"]
+macro_refresh_interval_hours: int = 24
+macro_retention_days: int = 90
+macro_retry_limit: int = 3
+```
+
+### StateManager Extensions
+
+**New Methods** (US-029):
+```python
+record_market_data_fetch(data_type, symbol, timestamp, stats)
+  # Record fetch metadata for order_book/options/macro
+
+get_last_market_data_fetch(data_type, symbol)
+  # Get last fetch timestamp and stats
+
+get_market_data_fetch_stats(data_type)
+  # Get aggregated statistics across all symbols
+```
+
+### DataFeed Extensions
+
+**New Loader Functions** (`src/services/data_feed.py`):
+```python
+load_order_book_snapshots(symbol, from_date, to_date)
+  # Load cached order book snapshots
+  # Returns: list[dict]
+
+load_options_chain(symbol, date)
+  # Load cached options chain for date
+  # Returns: dict | None
+
+load_macro_data(indicator, from_date, to_date)
+  # Load cached macro indicator data
+  # Returns: pd.DataFrame
+```
+
+### Provider Stubs (Phase 1)
+
+**Phase 1 Implementation**:
+- All ingestion scripts use **stub providers** (mock data generation)
+- Real provider integration deferred to Phase 2+
+
+**Stub Provider Features**:
+- Deterministic mock data (stable across runs)
+- Realistic data structures (matches real provider schemas)
+- Configurable via environment variables
+- Dryrun mode supported
+
+**Phase 2+ Roadmap** (Real Providers):
+- Breeze API integration for order book (WebSocket)
+- NSE/Breeze for options chains
+- yfinance/RBI APIs for macro indicators
+- Authentication and credential management
+- Production-grade error handling
+
+### Retry Policy
+
+**Consistent Across All Ingestion Scripts**:
+- Max Retries: Configurable via `*_retry_limit` (default: 3)
+- Backoff: Exponential with base delay from `*_retry_backoff_seconds`
+- Retryable Errors: ConnectionError, TimeoutError, HTTP 5xx, rate limit (429)
+- Non-Retryable: Authentication failures, HTTP 4xx (except 429)
+
+### Testing
+
+**Integration Tests** (`tests/integration/test_market_data_ingestion.py`):
+- Order book ingestion (dryrun mode)
+- Options chain ingestion (dryrun mode)
+- Macro data ingestion (dryrun mode)
+- StateManager market data tracking
+- DataFeed loader functions
+- Incremental mode behavior
+- Error handling and graceful degradation
+
+**All tests use mocked data** (no real network requests in Phase 1).
+
+### Usage Examples
+
+**Load Order Book Snapshots**:
+```python
+from datetime import datetime
+from src.services.data_feed import load_order_book_snapshots
+
+snapshots = load_order_book_snapshots(
+    symbol="RELIANCE",
+    from_date=datetime(2025, 1, 15),
+    to_date=datetime(2025, 1, 15),
+)
+
+for snap in snapshots:
+    bid_price = snap["bids"][0]["price"]
+    ask_price = snap["asks"][0]["price"]
+    spread = ask_price - bid_price
+    print(f"{snap['timestamp']}: spread={spread}")
+```
+
+**Load Options Chain**:
+```python
+from datetime import datetime
+from src.services.data_feed import load_options_chain
+
+chain = load_options_chain(
+    symbol="NIFTY",
+    date=datetime(2025, 1, 15),
+)
+
+if chain:
+    underlying = chain["underlying_price"]
+    for option in chain["options"]:
+        strike = option["strike"]
+        call_iv = option["call"]["iv"]
+        put_iv = option["put"]["iv"]
+        print(f"Strike {strike}: Call IV={call_iv}, Put IV={put_iv}")
+```
+
+**Load Macro Data**:
+```python
+from datetime import datetime
+from src.services.data_feed import load_macro_data
+
+df = load_macro_data(
+    indicator="NIFTY50",
+    from_date=datetime(2025, 1, 1),
+    to_date=datetime(2025, 1, 31),
+)
+
+print(df[["date", "value", "change_pct"]])
+```
+
+### Future Roadmap (Phase 2+)
+
+**Phase 2: Feature Engineering**
+- Calculate derived features from order book:
+  - Bid-ask spread, market depth imbalance, order book pressure
+  - Liquidity metrics (volume-weighted average, market impact estimation)
+- Calculate options-based features:
+  - IV percentile, put-call skew, options volume ratio
+  - Greeks aggregation (delta, gamma, vega)
+- Calculate macro-based features:
+  - Correlation with indices, volatility regime detection
+  - Macro momentum indicators
+
+**Phase 3: Signal Generation**
+- Build strategies incorporating market microstructure signals
+- Options-based volatility prediction models
+- Macro regime classification for strategy selection
+- Multi-timeframe feature fusion
+
+**Phase 4: Real Provider Integration**
+- Replace stub providers with real Breeze/NSE/RBI APIs
+- Implement WebSocket streaming for real-time order book
+- Add authentication and credential management
+- Production-grade error handling and monitoring
+
+### Related Documentation
+
+- [US-029 Story](stories/us-029-market-data.md) - Full specification
+- [US-024: Historical Data Ingestion](stories/us-024-historical-data.md) - OHLCV fetch
+- [StateManager](#state-management) - State tracking design
+
+---
+
+**US-029 Phase 1 Status**: ✅ Implemented
+**Data Types**: Order book, options chain, macro indicators
+**Providers**: Stub providers (mock data)
+**Safety**: Disabled by default, dryrun mode supported
+**Ingestion Scripts**: 3 (order book, options, macro)
+**StateManager Extensions**: 3 new methods
+**DataFeed Extensions**: 3 loader functions
+
+---
+
+## 20. Feature Engineering for Market Data (US-029 Phase 2)
+
+**Purpose**: Transform raw market data (order book, options, macro) into normalized feature frames ready for model training.
+
+### Phase 2 Overview
+
+Phase 2 builds on Phase 1's data collection infrastructure by adding feature computation modules that:
+- Extract microstructure signals from order book depth
+- Calculate volatility/skew metrics from options chains
+- Compute regime/correlation indicators from macro data
+- Integrate seamlessly into teacher/student training pipelines
+
+**Design Principles**:
+- **Safe defaults**: All feature computation disabled by default (opt-in via config flags)
+- **Graceful degradation**: Return empty DataFrames for missing data, log warnings
+- **Consistent interfaces**: All feature modules follow same pattern (DataFrame in → DataFrame out)
+- **Performance**: Vectorized pandas operations, minimal memory footprint
+- **Observability**: Feature coverage tracking in StateManager
+
+### Feature Catalog
+
+Phase 2 implements **37 features** across 3 categories:
+
+#### Order Book Features (12 features)
+
+**Spread Features** (4):
+- `ob_spread_abs` — Absolute bid-ask spread (ask - bid)
+- `ob_spread_rel` — Relative spread (spread / mid_price)
+- `ob_spread_pct` — Spread as percentage (%)
+- `ob_time_weighted_spread` — Time-weighted average spread over lookback window
+
+**Depth Imbalance Features** (4):
+- `ob_depth_imbalance_l1` — Level 1 imbalance: (bid_qty - ask_qty) / (bid_qty + ask_qty)
+- `ob_depth_imbalance_l5` — Aggregate L1-L5 imbalance
+- `ob_volume_weighted_price_bid` — Volume-weighted bid price (L1-L5)
+- `ob_volume_weighted_price_ask` — Volume-weighted ask price (L1-L5)
+
+**Order Flow Features** (4):
+- `ob_order_flow_ratio` — Bid orders / Ask orders (order count ratio)
+- `ob_market_pressure` — Weighted pressure: (bid_qty × bid_orders) - (ask_qty × ask_orders)
+- `ob_liquidity_imbalance` — Total bid liquidity / total ask liquidity
+- `ob_effective_spread` — Execution cost estimate (VWAP spread)
+
+#### Options Features (15 features)
+
+**Implied Volatility Features** (5):
+- `opt_iv_atm` — ATM implied volatility (average of ATM call/put IV)
+- `opt_iv_percentile` — IV percentile vs 30-day rolling history
+- `opt_iv_rank` — IV rank (0-100 scale)
+- `opt_iv_otm_call` — OTM call IV (5% OTM strike)
+- `opt_iv_otm_put` — OTM put IV (5% OTM strike)
+
+**Skew Features** (4):
+- `opt_skew_put_call` — Put-call skew (OTM put IV - OTM call IV)
+- `opt_skew_25delta` — 25-delta skew (RR: risk reversal)
+- `opt_skew_slope` — Skew slope (IV vs strike regression)
+- `opt_skew_curvature` — Skew curvature (convexity)
+
+**Volume & Open Interest Features** (3):
+- `opt_put_call_ratio_volume` — Put volume / call volume
+- `opt_put_call_ratio_oi` — Put OI / call OI
+- `opt_total_volume_ratio` — Total options volume / underlying volume
+
+**Greeks Aggregates** (3):
+- `opt_aggregate_delta` — Net delta across all strikes
+- `opt_aggregate_gamma` — Net gamma (convexity exposure)
+- `opt_aggregate_vega` — Net vega (volatility sensitivity)
+
+#### Macro Features (10 features)
+
+**Regime Features** (3):
+- `macro_volatility_regime` — Low/medium/high volatility (0/1/2 based on VIX percentile)
+- `macro_trend_regime` — Uptrend/sideways/downtrend (1/0/-1 based on price vs MA)
+- `macro_liquidity_regime` — Liquidity conditions (placeholder)
+
+**Correlation Features** (3):
+- `macro_correlation_nifty` — Rolling correlation with NIFTY50
+- `macro_correlation_vix` — Rolling correlation with India VIX
+- `macro_beta_nifty` — Beta vs NIFTY50 (regression slope)
+
+**Momentum Features** (4):
+- `macro_ma_crossover` — MA crossover signal (short vs long MA: 1/0/-1)
+- `macro_roc` — Rate of change (% change over window)
+- `macro_momentum_score` — Combined momentum indicator
+- `macro_volatility_mom` — Volatility momentum (rolling vol change)
+
+### Architecture
+
+#### Module Structure
+
+```
+src/
+├── features/                    # NEW: Feature engineering modules
+│   ├── __init__.py
+│   ├── order_book.py            # Order book feature computation
+│   ├── options.py               # Options feature computation
+│   └── macro.py                 # Macro feature computation
+├── domain/
+│   └── features.py              # EXTENDED: High-level wrappers
+├── app/
+│   └── config.py                # EXTENDED: Feature config toggles
+└── services/
+    └── state_manager.py         # EXTENDED: Feature coverage tracking
+```
+
+#### Feature Module Pattern
+
+All feature modules follow this consistent pattern:
+
+```python
+# src/features/order_book.py
+from __future__ import annotations
+import pandas as pd
+from loguru import logger
+
+def calculate_spread_features(
+    snapshots: pd.DataFrame,
+    lookback_window: int = 60,
+) -> pd.DataFrame:
+    """Calculate bid-ask spread features.
+
+    Args:
+        snapshots: DataFrame with columns [timestamp, bids, asks]
+        lookback_window: Lookback window in seconds
+
+    Returns:
+        DataFrame indexed by timestamp with columns:
+        [ob_spread_abs, ob_spread_rel, ob_spread_pct, ob_time_weighted_spread]
+    """
+    if snapshots.empty:
+        logger.warning("Empty snapshots for spread features")
+        return pd.DataFrame()
+
+    # Compute features using vectorized pandas operations
+    # ...
+
+    return features_df
+
+def compute_all_order_book_features(
+    snapshots: pd.DataFrame,
+    lookback_window: int = 60,
+) -> pd.DataFrame:
+    """Compute all order book features."""
+    spread = calculate_spread_features(snapshots, lookback_window)
+    depth = calculate_depth_imbalance(snapshots)
+    flow = calculate_order_flow_metrics(snapshots)
+    liquidity = calculate_liquidity_features(snapshots)
+
+    # Merge all features
+    features = spread.join([depth, flow, liquidity], how="outer")
+    return features.fillna(0)
+```
+
+**Key Design Patterns**:
+1. **DataFrame-centric**: All inputs/outputs are pandas DataFrames
+2. **Time-indexed**: Features indexed by timestamp (order book) or date (options/macro)
+3. **Vectorized**: Use pandas/numpy operations for performance
+4. **Graceful failures**: Return empty DataFrame on error, log warning
+5. **Modular**: Individual calculation functions + unified aggregator
+
+#### Integration Layer
+
+High-level wrapper functions in `src/domain/features.py` connect feature modules to data loading:
+
+```python
+# src/domain/features.py
+from datetime import datetime
+import pandas as pd
+from src.services.data_feed import load_order_book_snapshots, load_options_chain, load_macro_data
+from src.features.order_book import compute_all_order_book_features
+from src.features.options import compute_all_options_features
+from src.features.macro import compute_all_macro_features
+
+def compute_order_book_features(
+    symbol: str,
+    from_date: datetime,
+    to_date: datetime,
+    lookback_window: int = 60,
+) -> pd.DataFrame:
+    """Load order book data and compute features (US-029 Phase 2)."""
+    snapshots = load_order_book_snapshots(symbol, from_date, to_date)
+    if not snapshots:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(snapshots)
+    features = compute_all_order_book_features(df, lookback_window)
+    return features
+
+def compute_all_market_features(
+    symbol: str,
+    from_date: datetime,
+    to_date: datetime,
+    include_order_book: bool = False,
+    include_options: bool = False,
+    include_macro: bool = False,
+    macro_indicators: list[str] | None = None,
+) -> pd.DataFrame:
+    """Unified interface to compute all market features."""
+    features_dict = {}
+
+    if include_order_book:
+        features_dict["order_book"] = compute_order_book_features(symbol, from_date, to_date)
+    if include_options:
+        features_dict["options"] = compute_options_features(symbol, from_date, to_date)
+    if include_macro:
+        if macro_indicators is None:
+            macro_indicators = ["NIFTY50", "INDIAVIX", "USDINR"]
+        features_dict["macro"] = compute_macro_features(macro_indicators, from_date, to_date)
+
+    # Merge all feature DataFrames
+    combined = None
+    for feature_type, features in features_dict.items():
+        if not features.empty:
+            combined = features if combined is None else combined.join(features, how="outer")
+
+    return combined.fillna(0) if combined is not None else pd.DataFrame()
+```
+
+### Configuration
+
+Feature engineering is **disabled by default** and requires explicit opt-in:
+
+```python
+# src/app/config.py
+class Settings(BaseSettings):
+    # Feature Engineering Toggles (disabled by default)
+    enable_order_book_features: bool = Field(False, validation_alias="ENABLE_ORDER_BOOK_FEATURES")
+    enable_options_features: bool = Field(False, validation_alias="ENABLE_OPTIONS_FEATURES")
+    enable_macro_features: bool = Field(False, validation_alias="ENABLE_MACRO_FEATURES")
+
+    # Feature Computation Parameters
+    order_book_feature_lookback_seconds: int = Field(60, ge=1, le=600)
+    options_feature_iv_lookback_days: int = Field(30, ge=1, le=365)
+    macro_feature_correlation_window: int = Field(30, ge=1, le=365)
+    macro_feature_short_window: int = Field(10, ge=1, le=100)
+    macro_feature_long_window: int = Field(50, ge=1, le=500)
+```
+
+**Environment Variable Configuration**:
+```bash
+# .env
+ENABLE_ORDER_BOOK_FEATURES=true
+ENABLE_OPTIONS_FEATURES=true
+ENABLE_MACRO_FEATURES=false
+ORDER_BOOK_FEATURE_LOOKBACK_SECONDS=120
+OPTIONS_FEATURE_IV_LOOKBACK_DAYS=60
+```
+
+### State Management: Feature Coverage Tracking
+
+StateManager extended with feature coverage tracking for audit trail:
+
+```python
+# src/services/state_manager.py
+class StateManager:
+    def record_feature_coverage(
+        self,
+        symbol: str,
+        date_range: tuple[str, str],
+        feature_types: list[str],
+    ) -> None:
+        """Record which features were generated for symbol/date range."""
+        # Track: feature_types, date_range, timestamp
+        # Store in state["feature_coverage"][symbol]
+
+    def get_feature_coverage(
+        self,
+        symbol: str,
+    ) -> dict[str, Any]:
+        """Get feature coverage statistics."""
+        # Returns: {
+        #   "order_book_dates": count,
+        #   "options_dates": count,
+        #   "macro_dates": count,
+        #   "total_coverage_updates": count,
+        #   "last_coverage": timestamp
+        # }
+```
+
+### Usage Examples
+
+#### Standalone Feature Generation
+
+```python
+from datetime import datetime
+from src.domain.features import compute_all_market_features
+
+# Generate all available market features
+features = compute_all_market_features(
+    symbol="RELIANCE",
+    from_date=datetime(2025, 1, 15),
+    to_date=datetime(2025, 1, 20),
+    include_order_book=True,
+    include_options=True,
+    include_macro=True,
+    macro_indicators=["NIFTY50", "INDIAVIX"],
+)
+
+print(features.head())
+# Output: DataFrame with 37 columns (12 order book + 15 options + 10 macro)
+```
+
+#### Integration with Training Pipeline
+
+```python
+# scripts/train_teacher_batch.py
+def train_teacher_with_market_features(symbol: str, start_date, end_date):
+    # Load OHLCV + sentiment
+    ohlcv = load_historical_data(symbol, start_date, end_date)
+    sentiment = load_sentiment_data(symbol, start_date, end_date)
+
+    # Optionally load market features
+    market_features = pd.DataFrame()
+    if config.enable_order_book_features or config.enable_options_features or config.enable_macro_features:
+        market_features = compute_all_market_features(
+            symbol=symbol,
+            from_date=start_date,
+            to_date=end_date,
+            include_order_book=config.enable_order_book_features,
+            include_options=config.enable_options_features,
+            include_macro=config.enable_macro_features,
+        )
+
+        # Record feature coverage
+        feature_types = []
+        if config.enable_order_book_features:
+            feature_types.append("order_book")
+        if config.enable_options_features:
+            feature_types.append("options")
+        if config.enable_macro_features:
+            feature_types.append("macro")
+
+        state_manager.record_feature_coverage(
+            symbol=symbol,
+            date_range=(start_date.isoformat(), end_date.isoformat()),
+            feature_types=feature_types,
+        )
+
+    # Merge all features
+    X = ohlcv.join(sentiment).join(market_features, how="left").fillna(0)
+
+    # Train model
+    model = train_model(X, y)
+
+    # Save metadata with feature set info
+    metadata = {
+        "symbol": symbol,
+        "date_range": [start_date, end_date],
+        "feature_set": {
+            "ohlcv": True,
+            "sentiment": True,
+            "order_book": config.enable_order_book_features,
+            "options": config.enable_options_features,
+            "macro": config.enable_macro_features,
+            "total_features": len(X.columns),
+        },
+        # ...
+    }
+    save_run_metadata(metadata)
+```
+
+### Testing Strategy
+
+#### Unit Tests (`tests/unit/test_market_features.py`)
+
+Test individual feature calculation functions with deterministic toy data:
+
+```python
+def test_calculate_spread_features():
+    """Test spread calculation with toy order book data."""
+    snapshots = pd.DataFrame([{
+        "timestamp": "2025-01-15 09:15:00",
+        "bids": [{"price": 2450.0, "quantity": 1000, "orders": 5}],
+        "asks": [{"price": 2451.0, "quantity": 800, "orders": 4}],
+    }])
+
+    features = calculate_spread_features(snapshots)
+
+    assert "ob_spread_abs" in features.columns
+    assert features["ob_spread_abs"].iloc[0] == 1.0  # 2451 - 2450
+    assert features["ob_spread_rel"].iloc[0] == pytest.approx(1.0 / 2450.5)
+
+def test_calculate_iv_features():
+    """Test IV calculation with toy options data."""
+    chain = pd.DataFrame([{
+        "date": "2025-01-15",
+        "strike": 21500,
+        "underlying_price": 21500,
+        "call_iv": 0.18,
+        "put_iv": 0.17,
+    }])
+
+    features = calculate_iv_features(chain)
+
+    assert "opt_iv_atm" in features.columns
+    assert features["opt_iv_atm"].iloc[0] == pytest.approx(0.175)  # (0.18 + 0.17) / 2
+```
+
+**Coverage**: 20+ unit tests covering:
+- All 12 order book feature functions
+- All 15 options feature functions
+- All 10 macro feature functions
+- Edge cases: empty input, single snapshot, zero values, numerical stability
+
+#### Integration Tests (`tests/integration/test_market_features.py`)
+
+Test end-to-end feature generation with mocked data:
+
+```python
+def test_order_book_feature_generation_end_to_end(mock_order_book_data):
+    """Test full pipeline: load data → compute features → return DataFrame."""
+    features = compute_order_book_features(
+        symbol="RELIANCE",
+        from_date=datetime(2025, 1, 15),
+        to_date=datetime(2025, 1, 15),
+    )
+
+    assert isinstance(features, pd.DataFrame)
+    assert not features.empty
+    assert all(col.startswith("ob_") for col in features.columns)
+
+def test_feature_coverage_tracking(temp_state_file):
+    """Test StateManager feature coverage tracking."""
+    sm = StateManager(state_file=temp_state_file)
+
+    sm.record_feature_coverage(
+        symbol="RELIANCE",
+        date_range=("2025-01-15", "2025-01-17"),
+        feature_types=["order_book", "options"],
+    )
+
+    coverage = sm.get_feature_coverage("RELIANCE")
+    assert coverage["total_coverage_updates"] == 1
+    assert coverage["order_book_dates"] == 1
+    assert coverage["options_dates"] == 1
+```
+
+**Coverage**: 11 integration tests covering:
+- End-to-end feature generation for all 3 data types
+- `compute_all_market_features()` unified interface
+- StateManager feature coverage tracking
+- Persistence across StateManager instances
+- Graceful handling of missing data
+
+### Performance Considerations
+
+**Memory Efficiency**:
+- Features computed in chunks (per-symbol, per-date-range)
+- Empty DataFrames returned immediately for missing data
+- No feature caching (compute on-demand)
+
+**Computation Cost**:
+- Order book features: O(n) where n = number of snapshots (~3600 for 1 hour at 1Hz)
+- Options features: O(m × k) where m = dates, k = strikes per date (~20-50)
+- Macro features: O(m × w) where m = dates, w = rolling window (~30-50 days)
+
+**Typical Latencies** (1 symbol, 1 day):
+- Order book: ~50-100ms (3600 snapshots)
+- Options: ~10-20ms (30 strikes)
+- Macro: ~5-10ms (3 indicators)
+
+### Related Documentation
+
+- [US-029 Story](stories/us-029-market-data.md) — Full Phase 2 specification
+- [Phase 1: Data Collection](#19-order-book-options-and-macro-data-integration-us-029-phase-1) — Foundation
+- [Feature Engineering Guide](stories/us-029-market-data.md#phase-2-feature-catalog) — Complete feature catalog
+
+---
+
+**US-029 Phase 2 Status**: ✅ Implemented
+**Feature Count**: 37 (12 order book + 15 options + 10 macro)
+**Feature Modules**: 3 (order_book.py, options.py, macro.py)
+**Integration**: Teacher/student training pipelines ready
+**Configuration**: Safe defaults (all disabled), opt-in via env vars
+**State Tracking**: Feature coverage audit trail in StateManager
+**Test Coverage**: 20+ unit tests, 11 integration tests
+
+---
+
+## 21. Strategy Integration of Advanced Market Features (US-029 Phase 3)
+
+**Purpose**: Integrate market features (order book, options, macro) into trading strategies with configurable gating rules and signal adjustments.
+
+### Phase 3 Overview
+
+Phase 3 integrates Phase 2 market features into trading strategies and pipeline components:
+- Market feature gates in intraday and swing strategies (spread filters, IV gates, macro regime filters)
+- Optimizer feature flag combinations for parameter tuning
+- Backtester feature usage tracking for observability
+- Backward-compatible design (all gates disabled by default)
+
+### Strategy Integration Pattern
+
+All strategies follow this pattern for market feature integration:
+
+```python
+def signal(
+    df: pd.DataFrame,
+    settings: Settings,
+    *,
+    sentiment: float | None = None,
+    market_features: dict[str, float] | None = None,  # NEW: Phase 3
+) -> Signal:
+    # 1. Generate base signal (existing logic)
+    direction, strength = _generate_base_signal(df, settings, sentiment)
+
+    # 2. Apply market feature gates (if enabled and provided)
+    if market_features and _any_gate_enabled(settings):
+        direction, strength = _apply_feature_gates(
+            direction, strength, market_features, settings
+        )
+
+    # 3. Build metadata with feature checks
+    meta = {
+        "base_signal": {"direction": direction, "strength": strength},
+        "feature_checks": {
+            "spread_filter": {...},
+            "iv_gate": {...},
+            "macro_regime": {...},
+        },
+    }
+
+    return Signal(symbol="", direction=direction, strength=strength, meta=meta)
+```
+
+### Intraday Strategy Feature Gates
+
+**Spread Filter** (`intraday_spread_filter_enabled`):
+- Blocks ALL signals if `ob_spread_pct > intraday_max_spread_pct` (default 0.5%)
+- Prevents trading in illiquid conditions
+
+**IV Gate** (`intraday_iv_adjustment_enabled`):
+- Blocks LONG if `opt_iv_percentile > 80` (high volatility risk)
+- Blocks SHORT if `opt_iv_percentile < 20` (low volatility, limited upside)
+
+**Macro Regime Filter** (`intraday_macro_regime_filter_enabled`):
+- Blocks LONG if `macro_trend_regime == -1` (downtrend)
+- Blocks SHORT if `macro_trend_regime == 1` (uptrend)
+- Blocks ALL if `macro_volatility_regime == 2` (high volatility)
+
+**Market Pressure Adjustment** (`intraday_market_pressure_adjustment_enabled`):
+- Boosts LONG strength by `min(0.2, ob_market_pressure / 1000)` if pressure > 0
+- Boosts SHORT strength by `min(0.2, -ob_market_pressure / 1000)` if pressure < 0
+
+### Swing Strategy Feature Gates
+
+**IV Position Sizing** (`swing_iv_position_sizing_enabled`):
+- Reduces size by 30% if `opt_iv_rank > 70` (elevated volatility)
+- Increases size by 20% if `opt_iv_rank < 30` (compressed volatility)
+
+**Macro Correlation Filter** (`swing_macro_correlation_filter_enabled`):
+- Blocks signals if `abs(macro_correlation_nifty) < 0.3` (low correlation, stock-specific risk)
+- Reduces strength by 20% if `macro_beta_nifty > 1.5` (high beta, amplified moves)
+
+### Optimizer Feature Toggle Integration
+
+When `optimizer_test_feature_combinations = True`, optimizer includes feature flags in parameter grid:
+
+```python
+# Optimizer adds 3 binary feature flags to search space
+feature_flags = {
+    "spread_filter_enabled": [False, True],
+    "iv_adjustment_enabled": [False, True],
+    "macro_regime_filter_enabled": [False, True],
+}
+
+# Grid search: base_params × feature_combinations
+# Example: 2 risk_per_trade values × 2^3 feature combinations = 16 candidates
+```
+
+**Results**: Feature flags included in optimization artifacts (`ranked_results.csv`, `best_config.json`)
+
+### Backtester Feature Usage Tracking
+
+Backtester tracks feature gate evaluation and blocking:
+
+```python
+# Initialization
+self.feature_usage_stats = {
+    "spread_filter": {"checks": 0, "blocks": 0},
+    "iv_gate": {"checks": 0, "blocks": 0},
+    "macro_regime": {"checks": 0, "blocks": 0},
+    "market_pressure": {"checks": 0, "adjustments": 0},
+}
+
+# After each signal generation
+if sig.meta and "feature_checks" in sig.meta:
+    self._track_feature_usage(sig.meta)
+
+# Results metadata includes:
+result.metadata["feature_usage"] = {
+    "spread_filter": {"checks": 1250, "blocks": 37, "block_rate": 0.0296},
+    "iv_gate": {"checks": 1250, "blocks": 89, "block_rate": 0.0712},
+    # ...
+}
+```
+
+### Configuration
+
+**Intraday Gates**:
+```bash
+# .env
+INTRADAY_SPREAD_FILTER_ENABLED=true
+INTRADAY_MAX_SPREAD_PCT=0.5
+INTRADAY_MARKET_PRESSURE_ADJUSTMENT_ENABLED=true
+INTRADAY_IV_ADJUSTMENT_ENABLED=true
+INTRADAY_MACRO_REGIME_FILTER_ENABLED=true
+```
+
+**Swing Gates**:
+```bash
+SWING_IV_POSITION_SIZING_ENABLED=true
+SWING_MACRO_CORRELATION_FILTER_ENABLED=true
+```
+
+**Optimizer**:
+```bash
+OPTIMIZER_TEST_FEATURE_COMBINATIONS=true
+```
+
+### Backward Compatibility
+
+**Safe Defaults**: All feature gates default to `False` - zero behavior change when disabled
+
+**Zero Overhead**: When gates disabled:
+- No market features fetched
+- No feature checks performed
+- No metadata overhead
+- Strategies behave identically to pre-Phase 3
+
+**Testing**: Explicit backward compatibility tests verify legacy behavior preserved
+
+### Signal Metadata Schema
+
+```json
+{
+  "base_signal": {
+    "direction": "LONG",
+    "strength": 0.7,
+    "reason": "long_sma_rsi_sentiment_ok"
+  },
+  "feature_checks": {
+    "spread_filter": {
+      "enabled": true,
+      "passed": true,
+      "spread_pct": 0.35,
+      "threshold": 0.5
+    },
+    "iv_gate": {
+      "enabled": true,
+      "passed": true,
+      "iv_percentile": 45.2,
+      "skew": 0.02
+    },
+    "macro_regime": {
+      "enabled": true,
+      "passed": true,
+      "trend_regime": 0,
+      "vol_regime": 1
+    },
+    "market_pressure": {
+      "enabled": true,
+      "pressure": 1500.0,
+      "adjustment": 0.15,
+      "adjusted_strength": 0.85
+    }
+  }
+}
+```
+
+### Related Documentation
+
+- [US-029 Story Phase 3](stories/us-029-market-data.md#phase-3-strategy-integration) — Full specification
+- [Phase 1: Data Collection](#19-order-book-options-and-macro-data-integration-us-029-phase-1)
+- [Phase 2: Feature Engineering](#20-feature-engineering-for-market-data-us-029-phase-2)
+
+---
+
+**US-029 Phase 3 Status**: ✅ Implemented
+**Strategy Integration**: Intraday (4 gates), Swing (2 gates)
+**Optimizer**: Feature flag combinations in parameter grid
+**Backtester**: Feature usage tracking in metadata
+**Configuration**: 10 config flags (all default False)
+**Backward Compatible**: ✅ Zero behavior change when disabled
+**Test Coverage**: 7 unit tests (strategy gates), 3 integration tests (pipeline)

@@ -370,6 +370,13 @@ class BatchTrainer:
                     },
                 )
 
+        # US-029 Phase 2: Track market feature configuration
+        metadata["feature_set"] = {
+            "order_book_enabled": self.settings.enable_order_book_features,
+            "options_enabled": self.settings.enable_options_features,
+            "macro_enabled": self.settings.enable_macro_features,
+        }
+
         # Append to JSON Lines file (thread-safe with lock)
         with self.metadata_lock:
             with open(self.metadata_file, "a") as f:

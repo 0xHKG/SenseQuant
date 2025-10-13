@@ -202,3 +202,188 @@ def test_validation_runner_error_handling(tmp_validation_dir: Path) -> None:
 
     finally:
         sys.path.pop(0)
+
+
+def test_validation_optimizer_integration(tmp_validation_dir: Path) -> None:
+    """Test optimizer integration in validation workflow (US-025 Phase 2)."""
+    import json
+    import sys
+
+    sys.path.insert(0, "scripts")
+
+    try:
+        from run_model_validation import ModelValidationRunner
+
+        # Create mock optimizer artifacts directory
+        run_id = "test_validation_005"
+        runner = ModelValidationRunner(
+            run_id=run_id,
+            symbols=["RELIANCE"],
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            dryrun=True,
+            skip_optimizer=False,
+            skip_reports=True,
+        )
+
+        # Run validation
+        results = runner.run()
+
+        # Verify optimizer results structure
+        assert "optimizer_results" in results
+        assert results["optimizer_results"]["status"] == "skipped"
+        assert results["optimizer_results"]["reason"] == "dryrun"
+        assert "best_configs" in results["optimizer_results"]
+
+        # Verify summary includes optimizer section
+        summary_json = runner.release_dir / "validation_summary.json"
+        assert summary_json.exists()
+
+        with open(summary_json) as f:
+            summary = json.load(f)
+            assert "optimizer_results" in summary
+            assert summary["optimizer_results"]["status"] == "skipped"
+
+    finally:
+        sys.path.pop(0)
+
+
+def test_validation_report_generation(tmp_validation_dir: Path) -> None:
+    """Test notebook report generation in validation workflow (US-025 Phase 2)."""
+    import json
+    import sys
+
+    sys.path.insert(0, "scripts")
+
+    try:
+        from run_model_validation import ModelValidationRunner
+
+        # Test with skip_reports=False
+        run_id = "test_validation_006"
+        runner = ModelValidationRunner(
+            run_id=run_id,
+            symbols=["RELIANCE"],
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            dryrun=True,
+            skip_optimizer=True,
+            skip_reports=False,
+        )
+
+        # Run validation
+        results = runner.run()
+
+        # In dryrun mode, reports should be skipped
+        assert "reports" in results
+        assert results["reports"] == []
+
+        # Verify summary includes reports section
+        summary_json = runner.release_dir / "validation_summary.json"
+        assert summary_json.exists()
+
+        with open(summary_json) as f:
+            summary = json.load(f)
+            assert "reports" in summary
+            assert isinstance(summary["reports"], list)
+
+    finally:
+        sys.path.pop(0)
+
+
+def test_validation_summary_with_metrics(tmp_validation_dir: Path) -> None:
+    """Test validation summary includes teacher/student metrics (US-025 Phase 2)."""
+    import json
+    import sys
+
+    sys.path.insert(0, "scripts")
+
+    try:
+        from run_model_validation import ModelValidationRunner
+
+        run_id = "test_validation_007"
+        runner = ModelValidationRunner(
+            run_id=run_id,
+            symbols=["RELIANCE", "TCS"],
+            start_date="2024-01-01",
+            end_date="2024-12-31",
+            dryrun=True,
+            skip_optimizer=True,
+            skip_reports=True,
+        )
+
+        # Create mock teacher/student runs
+        runner.models_dir.mkdir(parents=True, exist_ok=True)
+
+        # Mock teacher_runs.json
+        teacher_runs = [
+            {
+                "batch_id": "batch_001",
+                "symbol": "RELIANCE",
+                "metrics": {"precision": 0.82, "recall": 0.78, "f1": 0.80},
+                "status": "success",
+            },
+            {
+                "batch_id": "batch_002",
+                "symbol": "TCS",
+                "metrics": {"precision": 0.85, "recall": 0.80, "f1": 0.82},
+                "status": "success",
+            },
+        ]
+        with open(runner.models_dir / "teacher_runs.json", "w") as f:
+            for run in teacher_runs:
+                f.write(json.dumps(run) + "\n")
+
+        # Mock student_runs.json
+        student_runs = [
+            {
+                "batch_id": "batch_003",
+                "symbol": "RELIANCE",
+                "metrics": {"accuracy": 0.84, "precision": 0.81, "recall": 0.78},
+                "status": "success",
+            },
+            {
+                "batch_id": "batch_004",
+                "symbol": "TCS",
+                "metrics": {"accuracy": 0.86, "precision": 0.83, "recall": 0.80},
+                "status": "success",
+            },
+        ]
+        with open(runner.models_dir / "student_runs.json", "w") as f:
+            for run in student_runs:
+                f.write(json.dumps(run) + "\n")
+
+        # Run validation
+        runner.run()
+
+        # Verify summary includes metrics
+        summary_json = runner.release_dir / "validation_summary.json"
+        assert summary_json.exists()
+
+        with open(summary_json) as f:
+            summary = json.load(f)
+
+            # Check teacher results
+            assert "teacher_results" in summary
+            assert summary["teacher_results"]["status"] == "skipped"
+            assert "metrics" in summary["teacher_results"]
+            teacher_metrics = summary["teacher_results"]["metrics"]
+            assert teacher_metrics["runs_completed"] == 2
+            assert 0.80 <= teacher_metrics["avg_precision"] <= 0.85
+            assert 0.75 <= teacher_metrics["avg_recall"] <= 0.85
+
+            # Check student results
+            assert "student_results" in summary
+            assert summary["student_results"]["status"] == "skipped"
+            assert "metrics" in summary["student_results"]
+            student_metrics = summary["student_results"]["metrics"]
+            assert student_metrics["runs_completed"] == 2
+            assert 0.80 <= student_metrics["avg_accuracy"] <= 0.90
+            assert 0.75 <= student_metrics["avg_precision"] <= 0.85
+
+            # Check promotion recommendation
+            assert "promotion_recommendation" in summary
+            assert "approved" in summary["promotion_recommendation"]
+            assert "reason" in summary["promotion_recommendation"]
+
+    finally:
+        sys.path.pop(0)

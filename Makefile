@@ -41,6 +41,32 @@ clean:
 all: lint type test
 
 # ============================================================================
+# US-027: Deployment & Operations
+# ============================================================================
+
+.PHONY: deploy-prod deploy-staging deploy-status rollback
+
+# Deploy to staging
+deploy-staging:
+	@echo "→ Deploying to STAGING..."
+	python scripts/deploy.py --environment staging
+
+# Deploy to production (with confirmation)
+deploy-prod:
+	@echo "→ Deploying to PRODUCTION..."
+	python scripts/deploy.py --environment prod
+
+# Rollback last deployment
+rollback:
+	@echo "→ Rolling back last deployment..."
+	python scripts/deploy.py --rollback --environment prod
+
+# View deployment status
+deploy-status:
+	@echo "→ Deployment Status"
+	@python -c "from src.services.state_manager import StateManager; import json; sm = StateManager(); print(json.dumps(sm.get_deployment_history(5), indent=2))"
+
+# ============================================================================
 # Release Automation (US-023)
 # ============================================================================
 

@@ -91,6 +91,9 @@ class ParameterOptimizer:
     def _generate_grid_candidates(self) -> list[dict[str, Any]]:
         """Generate all combinations for grid search (Cartesian product).
 
+        US-029 Phase 3: If optimizer_test_feature_combinations is enabled,
+        includes feature flags in the parameter grid.
+
         Returns:
             List of parameter dictionaries
         """
@@ -112,6 +115,28 @@ class ParameterOptimizer:
                 param_names.append(key)
                 param_values.append(values if isinstance(values, list) else [values])
 
+        # US-029 Phase 3: Add feature flags if enabled
+        if self.settings.optimizer_test_feature_combinations:
+            # Add feature flag combinations
+            param_names.extend(
+                [
+                    "feature_flags.spread_filter_enabled",
+                    "feature_flags.iv_adjustment_enabled",
+                    "feature_flags.macro_regime_filter_enabled",
+                ]
+            )
+            param_values.extend(
+                [
+                    [False, True],  # spread_filter
+                    [False, True],  # iv_adjustment
+                    [False, True],  # macro_regime
+                ]
+            )
+            logger.info(
+                "Including feature flag combinations in parameter grid",
+                extra={"component": "optimizer", "feature_flags": 3},
+            )
+
         # Generate Cartesian product
         combinations = list(itertools.product(*param_values))
 
@@ -124,7 +149,13 @@ class ParameterOptimizer:
                     parts = name.split(".")
                     if parts[0] not in params:
                         params[parts[0]] = {}
-                    params[parts[0]][parts[1]] = value
+                    if len(parts) > 2:
+                        # Nested deeper (e.g., feature_flags.spread_filter_enabled)
+                        if parts[1] not in params[parts[0]]:
+                            params[parts[0]][parts[1]] = {}
+                        params[parts[0]][parts[1]][parts[2]] = value
+                    else:
+                        params[parts[0]][parts[1]] = value
                 else:
                     params[name] = value
             candidates.append(params)

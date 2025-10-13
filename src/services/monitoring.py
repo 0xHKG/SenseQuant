@@ -1689,3 +1689,290 @@ class MonitoringService:
                 "intraday": 24,
                 "swing": 2160,  # 90 days in hours
             }
+
+    # ========================================================================
+    # US-027: Liveness Checks & Escalation
+    # ========================================================================
+
+    def heartbeat(self) -> None:
+        """Report heartbeat (engine alive signal) for liveness monitoring (US-027)."""
+        self.heartbeat_timestamp = datetime.now()
+        logger.debug("Heartbeat reported", extra={"component": "monitoring"})
+
+    def check_heartbeat_health(self) -> HealthCheckResult:
+        """Check heartbeat liveness and trigger escalation if needed (US-027).
+
+        Returns:
+            HealthCheckResult with heartbeat status
+        """
+        if not self.heartbeat_timestamp:
+            return HealthCheckResult(
+                check_name="heartbeat",
+                status="WARNING",
+                message="No heartbeat recorded yet",
+            )
+
+        now = datetime.now()
+        elapsed = (now - self.heartbeat_timestamp).total_seconds()
+        threshold = self.settings.monitoring_heartbeat_lapse_seconds
+
+        if elapsed > threshold:
+            # Track consecutive failures
+            consecutive_failures = self._get_consecutive_failures("heartbeat")
+
+            # Escalate based on failure count
+            if consecutive_failures >= 3:
+                # CRITICAL: 3+ consecutive failures
+                self._escalate_liveness_failure(
+                    event="heartbeat_failure",
+                    severity="CRITICAL",
+                    elapsed=elapsed,
+                    consecutive_failures=consecutive_failures,
+                )
+            elif consecutive_failures >= 2:
+                # WARNING: 2 consecutive failures
+                self._escalate_liveness_failure(
+                    event="heartbeat_failure",
+                    severity="WARNING",
+                    elapsed=elapsed,
+                    consecutive_failures=consecutive_failures,
+                )
+
+            return HealthCheckResult(
+                check_name="heartbeat",
+                status="ERROR",
+                message=f"Heartbeat lapsed for {elapsed:.0f}s (threshold: {threshold}s)",
+                details={
+                    "elapsed_seconds": elapsed,
+                    "threshold_seconds": threshold,
+                    "consecutive_failures": consecutive_failures,
+                },
+            )
+
+        # Reset consecutive failures on success
+        self._reset_consecutive_failures("heartbeat")
+
+        return HealthCheckResult(
+            check_name="heartbeat",
+            status="OK",
+            message=f"Heartbeat healthy ({elapsed:.0f}s ago)",
+        )
+
+    def check_service_availability(self, service_name: str, check_fn: Any) -> HealthCheckResult:
+        """Check if critical service is available (US-027).
+
+        Args:
+            service_name: Name of service to check (e.g., "breeze_api", "database")
+            check_fn: Callable that returns True if service available
+
+        Returns:
+            HealthCheckResult with service availability status
+        """
+        try:
+            is_available = check_fn()
+
+            if not is_available:
+                consecutive_failures = self._get_consecutive_failures(f"service_{service_name}")
+
+                if consecutive_failures >= 3:
+                    self._escalate_liveness_failure(
+                        event=f"service_unavailable_{service_name}",
+                        severity="CRITICAL",
+                        elapsed=0,
+                        consecutive_failures=consecutive_failures,
+                    )
+
+                return HealthCheckResult(
+                    check_name=f"service_{service_name}",
+                    status="ERROR",
+                    message=f"Service unavailable: {service_name}",
+                    details={"consecutive_failures": consecutive_failures},
+                )
+
+            # Reset consecutive failures on success
+            self._reset_consecutive_failures(f"service_{service_name}")
+
+            return HealthCheckResult(
+                check_name=f"service_{service_name}",
+                status="OK",
+                message=f"Service available: {service_name}",
+            )
+
+        except Exception as e:
+            logger.error(
+                f"Service availability check failed: {service_name}: {e}",
+                extra={"component": "monitoring", "service": service_name, "error": str(e)},
+            )
+            return HealthCheckResult(
+                check_name=f"service_{service_name}",
+                status="ERROR",
+                message=f"Service check error: {service_name}: {e}",
+            )
+
+    def _get_consecutive_failures(self, check_name: str) -> int:
+        """Get count of consecutive failures for a check.
+
+        Args:
+            check_name: Name of check
+
+        Returns:
+            Number of consecutive failures
+        """
+        if not hasattr(self, "_consecutive_failures"):
+            self._consecutive_failures: dict[str, int] = {}
+
+        return self._consecutive_failures.get(check_name, 0)
+
+    def _increment_consecutive_failures(self, check_name: str) -> int:
+        """Increment consecutive failures counter.
+
+        Args:
+            check_name: Name of check
+
+        Returns:
+            New failure count
+        """
+        if not hasattr(self, "_consecutive_failures"):
+            self._consecutive_failures: dict[str, int] = {}
+
+        self._consecutive_failures[check_name] = self._consecutive_failures.get(check_name, 0) + 1
+        return self._consecutive_failures[check_name]
+
+    def _reset_consecutive_failures(self, check_name: str) -> None:
+        """Reset consecutive failures counter.
+
+        Args:
+            check_name: Name of check
+        """
+        if not hasattr(self, "_consecutive_failures"):
+            self._consecutive_failures: dict[str, int] = {}
+
+        if check_name in self._consecutive_failures:
+            del self._consecutive_failures[check_name]
+
+    def _escalate_liveness_failure(
+        self,
+        event: str,
+        severity: str,
+        elapsed: float,
+        consecutive_failures: int,
+    ) -> None:
+        """Escalate liveness check failure with alert and optional hook (US-027).
+
+        Args:
+            event: Event name (e.g., "heartbeat_failure", "service_unavailable_breeze")
+            severity: Alert severity ("WARNING" or "CRITICAL")
+            elapsed: Time elapsed since last success (seconds)
+            consecutive_failures: Number of consecutive failures
+        """
+        # Increment failure counter
+        self._increment_consecutive_failures(event)
+
+        # Create alert
+        alert = Alert(
+            timestamp=datetime.now().isoformat(),
+            severity=severity,  # type: ignore[arg-type]
+            rule=f"liveness_check_{event}",
+            message=f"Liveness check failed: {event} ({consecutive_failures} consecutive failures)",
+            context={
+                "event": event,
+                "elapsed_seconds": elapsed,
+                "consecutive_failures": consecutive_failures,
+            },
+        )
+
+        # Emit alert (will deliver via plugins)
+        self.emit_alert(alert)
+
+        # Execute escalation hook if CRITICAL
+        if severity == "CRITICAL":
+            self._execute_escalation_hook(event)
+
+    def _execute_escalation_hook(self, event: str) -> None:
+        """Execute escalation hook command (US-027).
+
+        Args:
+            event: Event name for hook lookup (e.g., "heartbeat_failure")
+        """
+        import os
+        import subprocess
+
+        hook_env_var = f"ESCALATION_HOOK_{event.upper()}"
+        hook_cmd = os.getenv(hook_env_var)
+
+        if not hook_cmd:
+            logger.debug(
+                f"No escalation hook configured: {hook_env_var}",
+                extra={"component": "monitoring", "event": event},
+            )
+            return
+
+        logger.critical(
+            f"🚨 Executing escalation hook: {event}",
+            extra={"component": "monitoring", "event": event, "command": hook_cmd},
+        )
+
+        try:
+            result = subprocess.run(
+                hook_cmd,
+                shell=True,
+                timeout=30,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            logger.info(
+                f"Escalation hook executed successfully: {event}",
+                extra={
+                    "component": "monitoring",
+                    "event": event,
+                    "stdout": result.stdout,
+                },
+            )
+
+        except subprocess.TimeoutExpired:
+            logger.error(
+                f"Escalation hook timed out: {event}",
+                extra={"component": "monitoring", "event": event},
+            )
+
+        except subprocess.CalledProcessError as e:
+            logger.error(
+                f"Escalation hook failed: {event}: {e}",
+                extra={
+                    "component": "monitoring",
+                    "event": event,
+                    "returncode": e.returncode,
+                    "stderr": e.stderr,
+                },
+            )
+
+        except Exception as e:
+            logger.error(
+                f"Escalation hook error: {event}: {e}",
+                extra={"component": "monitoring", "event": event, "error": str(e)},
+            )
+
+    def get_alerts(
+        self,
+        severity: str | None = None,
+        limit: int = 100,
+        hours: int = 24,
+    ) -> list[Alert]:
+        """Get recent alerts with optional filtering (US-027).
+
+        Args:
+            severity: Filter by severity ("INFO", "WARNING", "CRITICAL")
+            limit: Maximum alerts to return
+            hours: Time window in hours
+
+        Returns:
+            List of alerts
+        """
+        alerts = self.get_active_alerts(hours=hours)
+
+        if severity:
+            alerts = [a for a in alerts if a.severity == severity]
+
+        return alerts[:limit]

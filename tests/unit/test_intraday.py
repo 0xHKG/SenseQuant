@@ -228,3 +228,173 @@ def test_signal_sentiment_default_none(sample_ohlc_df: pd.DataFrame, settings: S
     assert sig.direction == "LONG"
     assert sig.meta is not None
     assert sig.meta["sentiment"] == 0.0
+
+
+# ============================================================================
+# US-029 Phase 3: Market Feature Integration Tests
+# ============================================================================
+
+
+def test_spread_filter_blocks_wide_spread(sample_ohlc_df: pd.DataFrame, settings: Settings) -> None:
+    """Test spread filter blocks signal when spread too wide (US-029 Phase 3)."""
+    settings.intraday_spread_filter_enabled = True
+    settings.intraday_max_spread_pct = 0.5  # 0.5% max spread
+
+    df_features = compute_features(sample_ohlc_df, settings)
+
+    # Set conditions for LONG signal
+    df_features.loc[df_features.index[-1], "close"] = 110.0
+    df_features.loc[df_features.index[-1], "sma20"] = 100.0
+    df_features.loc[df_features.index[-1], "rsi14"] = 60.0
+    df_features.loc[df_features.index[-1], "valid"] = True
+
+    # Market features with wide spread (1.0% > 0.5% threshold)
+    market_features = {"ob_spread_pct": 1.0}
+
+    sig = signal(df_features, settings, sentiment=0.0, market_features=market_features)
+
+    assert sig.direction == "FLAT"  # Blocked by spread filter
+    assert sig.strength == 0.0
+    assert "feature_checks" in sig.meta
+    assert "spread_filter" in sig.meta["feature_checks"]
+    assert sig.meta["feature_checks"]["spread_filter"]["passed"] is False
+    assert sig.meta["reason"] == "blocked_by_spread_filter"
+
+
+def test_spread_filter_passes_narrow_spread(
+    sample_ohlc_df: pd.DataFrame, settings: Settings
+) -> None:
+    """Test spread filter allows signal when spread acceptable (US-029 Phase 3)."""
+    settings.intraday_spread_filter_enabled = True
+    settings.intraday_max_spread_pct = 0.5
+
+    df_features = compute_features(sample_ohlc_df, settings)
+
+    # Set conditions for LONG signal
+    df_features.loc[df_features.index[-1], "close"] = 110.0
+    df_features.loc[df_features.index[-1], "sma20"] = 100.0
+    df_features.loc[df_features.index[-1], "rsi14"] = 60.0
+    df_features.loc[df_features.index[-1], "valid"] = True
+
+    # Market features with narrow spread (0.3% < 0.5% threshold)
+    market_features = {"ob_spread_pct": 0.3}
+
+    sig = signal(df_features, settings, sentiment=0.0, market_features=market_features)
+
+    assert sig.direction == "LONG"  # Passes spread filter
+    assert sig.strength == 0.7
+    assert "feature_checks" in sig.meta
+    assert sig.meta["feature_checks"]["spread_filter"]["passed"] is True
+
+
+def test_iv_blocks_high_volatility_long(sample_ohlc_df: pd.DataFrame, settings: Settings) -> None:
+    """Test IV gate blocks LONG when volatility too high (US-029 Phase 3)."""
+    settings.intraday_iv_adjustment_enabled = True
+
+    df_features = compute_features(sample_ohlc_df, settings)
+
+    # Set conditions for LONG signal
+    df_features.loc[df_features.index[-1], "close"] = 110.0
+    df_features.loc[df_features.index[-1], "sma20"] = 100.0
+    df_features.loc[df_features.index[-1], "rsi14"] = 60.0
+    df_features.loc[df_features.index[-1], "valid"] = True
+
+    # Market features with high IV (85 > 80 threshold)
+    market_features = {"opt_iv_percentile": 85.0, "opt_skew_put_call": 0.02}
+
+    sig = signal(df_features, settings, sentiment=0.0, market_features=market_features)
+
+    assert sig.direction == "FLAT"  # Blocked by IV gate
+    assert sig.strength == 0.0
+    assert "feature_checks" in sig.meta
+    assert "iv_gate" in sig.meta["feature_checks"]
+    assert sig.meta["feature_checks"]["iv_gate"]["passed"] is False
+    assert "blocked_by_iv_gate" in sig.meta["reason"]
+
+
+def test_macro_regime_blocks_downtrend_long(
+    sample_ohlc_df: pd.DataFrame, settings: Settings
+) -> None:
+    """Test macro regime blocks LONG in downtrend (US-029 Phase 3)."""
+    settings.intraday_macro_regime_filter_enabled = True
+
+    df_features = compute_features(sample_ohlc_df, settings)
+
+    # Set conditions for LONG signal
+    df_features.loc[df_features.index[-1], "close"] = 110.0
+    df_features.loc[df_features.index[-1], "sma20"] = 100.0
+    df_features.loc[df_features.index[-1], "rsi14"] = 60.0
+    df_features.loc[df_features.index[-1], "valid"] = True
+
+    # Market features with downtrend (-1)
+    market_features = {"macro_trend_regime": -1, "macro_volatility_regime": 1}
+
+    sig = signal(df_features, settings, sentiment=0.0, market_features=market_features)
+
+    assert sig.direction == "FLAT"  # Blocked by macro regime
+    assert sig.strength == 0.0
+    assert "feature_checks" in sig.meta
+    assert "macro_regime" in sig.meta["feature_checks"]
+    assert sig.meta["feature_checks"]["macro_regime"]["passed"] is False
+    assert "blocked_by_macro_regime" in sig.meta["reason"]
+
+
+def test_market_pressure_boosts_long(sample_ohlc_df: pd.DataFrame, settings: Settings) -> None:
+    """Test market pressure adjustment boosts LONG strength (US-029 Phase 3)."""
+    settings.intraday_market_pressure_adjustment_enabled = True
+
+    df_features = compute_features(sample_ohlc_df, settings)
+
+    # Set conditions for LONG signal
+    df_features.loc[df_features.index[-1], "close"] = 110.0
+    df_features.loc[df_features.index[-1], "sma20"] = 100.0
+    df_features.loc[df_features.index[-1], "rsi14"] = 60.0
+    df_features.loc[df_features.index[-1], "valid"] = True
+
+    # Market features with strong positive pressure
+    market_features = {"ob_market_pressure": 1500.0}  # Should boost strength
+
+    sig = signal(df_features, settings, sentiment=0.0, market_features=market_features)
+
+    assert sig.direction == "LONG"
+    assert sig.strength > 0.7  # Boosted from base 0.7
+    assert "feature_checks" in sig.meta
+    assert "market_pressure" in sig.meta["feature_checks"]
+    assert sig.meta["feature_checks"]["market_pressure"]["adjustment"] > 0
+
+
+def test_feature_gates_disabled_by_default(
+    sample_ohlc_df: pd.DataFrame, settings: Settings
+) -> None:
+    """Test backward compatibility: no feature checks when gates disabled (US-029 Phase 3)."""
+    # All feature gates should be False by default
+    assert settings.intraday_spread_filter_enabled is False
+    assert settings.intraday_iv_adjustment_enabled is False
+    assert settings.intraday_macro_regime_filter_enabled is False
+    assert settings.intraday_market_pressure_adjustment_enabled is False
+
+    df_features = compute_features(sample_ohlc_df, settings)
+
+    # Set conditions for LONG signal
+    df_features.loc[df_features.index[-1], "close"] = 110.0
+    df_features.loc[df_features.index[-1], "sma20"] = 100.0
+    df_features.loc[df_features.index[-1], "rsi14"] = 60.0
+    df_features.loc[df_features.index[-1], "valid"] = True
+
+    # Market features provided but gates disabled
+    market_features = {
+        "ob_spread_pct": 2.0,  # Would block if enabled
+        "opt_iv_percentile": 90.0,  # Would block if enabled
+        "macro_trend_regime": -1,  # Would block if enabled
+    }
+
+    sig = signal(df_features, settings, sentiment=0.0, market_features=market_features)
+
+    # Signal should still pass (gates disabled)
+    assert sig.direction == "LONG"
+    assert sig.strength == 0.7
+    # No feature checks performed when gates disabled
+    if "feature_checks" in sig.meta:
+        # If present, all should be disabled
+        if "spread_filter" in sig.meta["feature_checks"]:
+            assert sig.meta["feature_checks"]["spread_filter"]["enabled"] is False

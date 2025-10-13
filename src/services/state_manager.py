@@ -25,12 +25,15 @@ class StateManager:
     - sentiment_fetch.json: Last sentiment fetch date per symbol
     """
 
-    def __init__(self, state_file: Path):
+    def __init__(self, state_file: Path | None = None):
         """Initialize state manager.
 
         Args:
-            state_file: Path to state JSON file
+            state_file: Path to state JSON file (default: data/state/state.json)
         """
+        if state_file is None:
+            state_file = Path("data/state/state.json")
+
         self.state_file = state_file
         self.state_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -542,3 +545,819 @@ class StateManager:
         runs.sort(key=lambda r: r.get("timestamp", ""), reverse=True)
 
         return runs
+
+    # US-026: Statistical Validation tracking
+
+    def record_statistical_validation(
+        self,
+        run_id: str,
+        timestamp: str,
+        status: str,
+        walk_forward_results: dict[str, Any],
+        bootstrap_results: dict[str, Any],
+        benchmark_comparison: dict[str, Any],
+    ) -> None:
+        """Record statistical validation results (US-026).
+
+        Args:
+            run_id: Validation run ID
+            timestamp: ISO 8601 timestamp
+            status: Status (completed/failed/skipped)
+            walk_forward_results: Walk-forward CV results
+            bootstrap_results: Bootstrap test results
+            benchmark_comparison: Benchmark comparison results
+        """
+        if "statistical_validations" not in self.state:
+            self.state["statistical_validations"] = {}
+
+        self.state["statistical_validations"][run_id] = {
+            "run_id": run_id,
+            "timestamp": timestamp,
+            "status": status,
+            "walk_forward_results": walk_forward_results,
+            "bootstrap_results": bootstrap_results,
+            "benchmark_comparison": benchmark_comparison,
+        }
+
+        # Update last benchmark comparison
+        if benchmark_comparison:
+            self.state["last_benchmark_comparison"] = {
+                "run_id": run_id,
+                "timestamp": timestamp,
+                "benchmark": benchmark_comparison.get("benchmark"),
+                "alpha": benchmark_comparison.get("alpha"),
+                "beta": benchmark_comparison.get("beta"),
+                "information_ratio": benchmark_comparison.get("information_ratio"),
+            }
+
+        self._save_state()
+        logger.info(f"Recorded statistical validation: {run_id} ({status})")
+
+    def get_statistical_validation(self, run_id: str) -> dict[str, Any] | None:
+        """Get statistical validation results by run ID.
+
+        Args:
+            run_id: Validation run ID
+
+        Returns:
+            Statistical validation dict or None if not found
+        """
+        statistical_validations = self.state.get("statistical_validations", {})
+        return statistical_validations.get(run_id)
+
+    def get_last_benchmark_comparison(self) -> dict[str, Any] | None:
+        """Get last benchmark comparison results.
+
+        Returns:
+            Last benchmark comparison dict or None if not found
+        """
+        return self.state.get("last_benchmark_comparison")
+
+    def get_statistical_validations(self, status: str | None = None) -> list[dict[str, Any]]:
+        """Get all statistical validations with optional filtering.
+
+        Args:
+            status: Optional status filter (completed/failed/skipped)
+
+        Returns:
+            List of statistical validation dicts
+        """
+        statistical_validations = self.state.get("statistical_validations", {})
+        validations = list(statistical_validations.values())
+
+        # Filter by status if provided
+        if status:
+            validations = [v for v in validations if v.get("status") == status]
+
+        # Sort by timestamp (most recent first)
+        validations.sort(key=lambda v: v.get("timestamp", ""), reverse=True)
+
+        return validations
+
+    # US-027: Deployment History Tracking
+
+    def record_deployment(
+        self,
+        release_id: str,
+        environment: str,
+        timestamp: str,
+        status: str,
+        artifacts: list[str],
+        rollback: bool,
+        smoke_test_passed: bool,
+        deployed_by: str,
+    ) -> None:
+        """Record deployment event (US-027).
+
+        Args:
+            release_id: Unique release identifier (e.g., "v1.2.3" or timestamp)
+            environment: Target environment ("prod", "staging")
+            timestamp: ISO timestamp of deployment
+            status: Deployment status ("success", "failed", "rolled_back")
+            artifacts: List of deployed artifact names
+            rollback: Whether this was a rollback operation
+            smoke_test_passed: Whether smoke tests passed
+            deployed_by: User or system that initiated deployment
+        """
+        if "deployments" not in self.state:
+            self.state["deployments"] = []
+
+        deployment_record = {
+            "release_id": release_id,
+            "environment": environment,
+            "timestamp": timestamp,
+            "status": status,
+            "artifacts": artifacts,
+            "rollback": rollback,
+            "smoke_test_passed": smoke_test_passed,
+            "deployed_by": deployed_by,
+        }
+
+        self.state["deployments"].append(deployment_record)
+
+        # Update last deployment pointer
+        if status == "success" and not rollback:
+            if "last_deployments" not in self.state:
+                self.state["last_deployments"] = {}
+
+            self.state["last_deployments"][environment] = {
+                "release_id": release_id,
+                "timestamp": timestamp,
+                "artifacts": artifacts,
+            }
+
+        self._save_state()
+        logger.info(
+            f"Recorded deployment: {release_id} to {environment} ({status})",
+            extra={
+                "release_id": release_id,
+                "environment": environment,
+                "status": status,
+                "rollback": rollback,
+            },
+        )
+
+    def get_deployment_history(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Get recent deployment history (US-027).
+
+        Args:
+            limit: Maximum number of deployments to return
+
+        Returns:
+            List of deployment records, most recent first
+        """
+        deployments = self.state.get("deployments", [])
+
+        # Sort by timestamp descending
+        sorted_deployments = sorted(
+            deployments,
+            key=lambda d: d.get("timestamp", ""),
+            reverse=True,
+        )
+
+        return sorted_deployments[:limit]
+
+    def get_last_deployment(self, environment: str = "prod") -> dict[str, Any] | None:
+        """Get last successful deployment for environment (US-027).
+
+        Args:
+            environment: Target environment ("prod", "staging")
+
+        Returns:
+            Last deployment record or None if no deployments
+        """
+        last_deployments = self.state.get("last_deployments", {})
+        return last_deployments.get(environment)
+
+    def get_deployments_by_environment(self, environment: str) -> list[dict[str, Any]]:
+        """Get deployment history for specific environment (US-027).
+
+        Args:
+            environment: Target environment ("prod", "staging")
+
+        Returns:
+            List of deployments for environment, most recent first
+        """
+        deployments = self.state.get("deployments", [])
+
+        # Filter by environment
+        env_deployments = [d for d in deployments if d.get("environment") == environment]
+
+        # Sort by timestamp descending
+        env_deployments.sort(key=lambda d: d.get("timestamp", ""), reverse=True)
+
+        return env_deployments
+
+    # US-028: Candidate Run Tracking
+
+    def record_candidate_run(
+        self,
+        run_id: str,
+        timestamp: str,
+        status: str,
+        training: dict[str, Any],
+        validation: dict[str, Any],
+        statistical_tests: dict[str, Any],
+        artifacts: dict[str, str],
+    ) -> None:
+        """Record candidate run for promotion tracking (US-028).
+
+        Args:
+            run_id: Unique run identifier (e.g., "live_candidate_20251012_153000")
+            timestamp: ISO timestamp of run
+            status: Run status ("ready-for-review", "approved", "rejected", "failed")
+            training: Training metrics dict (symbols, teacher/student metrics)
+            validation: Validation results dict
+            statistical_tests: Statistical test results dict
+            artifacts: Artifact paths dict (model_dir, audit_dir, manifest)
+        """
+        if "candidate_runs" not in self.state:
+            self.state["candidate_runs"] = []
+
+        candidate_record = {
+            "run_id": run_id,
+            "timestamp": timestamp,
+            "status": status,
+            "training": training,
+            "validation": validation,
+            "statistical_tests": statistical_tests,
+            "artifacts": artifacts,
+        }
+
+        self.state["candidate_runs"].append(candidate_record)
+
+        # Update latest candidate pointer
+        if status in ["ready-for-review", "approved"]:
+            self.state["latest_candidate"] = {
+                "run_id": run_id,
+                "timestamp": timestamp,
+                "status": status,
+            }
+
+        self._save_state()
+        logger.info(
+            f"Recorded candidate run: {run_id} ({status})",
+            extra={"run_id": run_id, "status": status},
+        )
+
+    def get_latest_candidate_run(self) -> dict[str, Any] | None:
+        """Get latest candidate run (US-028).
+
+        Returns:
+            Latest candidate record or None if no candidates
+        """
+        latest = self.state.get("latest_candidate")
+        if not latest:
+            return None
+
+        # Return full record
+        candidate_runs = self.state.get("candidate_runs", [])
+        for candidate in candidate_runs:
+            if candidate.get("run_id") == latest["run_id"]:
+                return candidate
+
+        return None
+
+    def get_candidate_runs(self, status: str | None = None) -> list[dict[str, Any]]:
+        """Get all candidate runs with optional status filter (US-028).
+
+        Args:
+            status: Optional status filter ("ready-for-review", "approved", "rejected", "failed")
+
+        Returns:
+            List of candidate records, most recent first
+        """
+        candidate_runs = self.state.get("candidate_runs", [])
+
+        # Filter by status if provided
+        if status:
+            candidate_runs = [c for c in candidate_runs if c.get("status") == status]
+
+        # Sort by timestamp descending
+        candidate_runs.sort(key=lambda c: c.get("timestamp", ""), reverse=True)
+
+        return candidate_runs
+
+    def approve_candidate_run(self, run_id: str, approved_by: str) -> None:
+        """Approve candidate run for deployment (US-028).
+
+        Args:
+            run_id: Candidate run identifier
+            approved_by: User who approved
+        """
+        candidate_runs = self.state.get("candidate_runs", [])
+
+        for candidate in candidate_runs:
+            if candidate.get("run_id") == run_id:
+                candidate["status"] = "approved"
+                candidate["approved_by"] = approved_by
+                candidate["approved_at"] = datetime.now().isoformat()
+
+                # Update latest candidate
+                self.state["latest_candidate"] = {
+                    "run_id": run_id,
+                    "timestamp": candidate["timestamp"],
+                    "status": "approved",
+                }
+
+                self._save_state()
+                logger.info(
+                    f"Approved candidate run: {run_id}",
+                    extra={"run_id": run_id, "approved_by": approved_by},
+                )
+                return
+
+        logger.warning(f"Candidate run not found: {run_id}")
+
+    # =====================================================================
+    # US-029: Market Data Ingestion Tracking
+    # =====================================================================
+
+    def record_market_data_fetch(
+        self,
+        data_type: str,
+        symbol: str,
+        timestamp: str,
+        stats: dict[str, Any],
+    ) -> None:
+        """Record market data fetch metadata (US-029).
+
+        Args:
+            data_type: Type of market data ("order_book", "options", "macro")
+            symbol: Stock symbol or indicator name
+            timestamp: Fetch timestamp (ISO format)
+            stats: Fetch statistics (fetched, cached, failed, etc.)
+        """
+        if "market_data" not in self.state:
+            self.state["market_data"] = {}
+
+        if data_type not in self.state["market_data"]:
+            self.state["market_data"][data_type] = {}
+
+        if symbol not in self.state["market_data"][data_type]:
+            self.state["market_data"][data_type][symbol] = {
+                "first_fetch": timestamp,
+                "last_fetch": timestamp,
+                "total_fetches": 0,
+                "total_errors": 0,
+                "history": [],
+            }
+
+        symbol_state = self.state["market_data"][data_type][symbol]
+
+        # Update summary
+        symbol_state["last_fetch"] = timestamp
+        symbol_state["total_fetches"] += 1
+        symbol_state["total_errors"] += stats.get("failed", 0)
+
+        # Append to history (keep last 100 entries)
+        symbol_state["history"].append(
+            {
+                "timestamp": timestamp,
+                "stats": stats,
+            }
+        )
+
+        # Trim history to last 100 entries
+        if len(symbol_state["history"]) > 100:
+            symbol_state["history"] = symbol_state["history"][-100:]
+
+        self._save_state()
+
+        logger.debug(
+            f"Recorded {data_type} fetch: {symbol}",
+            extra={
+                "data_type": data_type,
+                "symbol": symbol,
+                "timestamp": timestamp,
+                "stats": stats,
+            },
+        )
+
+    def get_last_market_data_fetch(
+        self,
+        data_type: str,
+        symbol: str,
+    ) -> dict[str, Any] | None:
+        """Get last fetch metadata for market data (US-029).
+
+        Args:
+            data_type: Type of market data ("order_book", "options", "macro")
+            symbol: Stock symbol or indicator name
+
+        Returns:
+            Dict with last fetch metadata, or None if never fetched
+        """
+        market_data = self.state.get("market_data", {})
+        data_type_state = market_data.get(data_type, {})
+        symbol_state = data_type_state.get(symbol)
+
+        if not symbol_state or not symbol_state.get("history"):
+            return None
+
+        # Return last history entry
+        last_entry = symbol_state["history"][-1]
+        return {
+            "timestamp": last_entry["timestamp"],
+            "stats": last_entry["stats"],
+            "total_fetches": symbol_state["total_fetches"],
+            "total_errors": symbol_state["total_errors"],
+        }
+
+    def get_market_data_fetch_stats(
+        self,
+        data_type: str,
+    ) -> dict[str, Any]:
+        """Get aggregated fetch statistics for market data type (US-029).
+
+        Args:
+            data_type: Type of market data ("order_book", "options", "macro")
+
+        Returns:
+            Dict with aggregated statistics across all symbols
+        """
+        market_data = self.state.get("market_data", {})
+        data_type_state = market_data.get(data_type, {})
+
+        if not data_type_state:
+            return {
+                "total_symbols": 0,
+                "total_fetches": 0,
+                "total_errors": 0,
+                "symbols": [],
+            }
+
+        total_fetches = 0
+        total_errors = 0
+        symbols = []
+
+        for symbol, symbol_state in data_type_state.items():
+            total_fetches += symbol_state.get("total_fetches", 0)
+            total_errors += symbol_state.get("total_errors", 0)
+            symbols.append(
+                {
+                    "symbol": symbol,
+                    "last_fetch": symbol_state.get("last_fetch"),
+                    "total_fetches": symbol_state.get("total_fetches", 0),
+                    "total_errors": symbol_state.get("total_errors", 0),
+                }
+            )
+
+        return {
+            "total_symbols": len(symbols),
+            "total_fetches": total_fetches,
+            "total_errors": total_errors,
+            "symbols": symbols,
+        }
+
+    # =====================================================================
+    # US-029 Phase 2: Feature Coverage Tracking
+    # =====================================================================
+
+    def record_feature_coverage(
+        self,
+        symbol: str,
+        date_range: tuple[str, str],
+        feature_types: list[str],
+    ) -> None:
+        """Record feature coverage for symbol/date range (US-029 Phase 2).
+
+        Args:
+            symbol: Stock symbol
+            date_range: Tuple of (start_date, end_date) in ISO format
+            feature_types: List of feature types generated (e.g., ["order_book", "options", "macro"])
+        """
+        if "feature_coverage" not in self.state:
+            self.state["feature_coverage"] = {}
+
+        if symbol not in self.state["feature_coverage"]:
+            self.state["feature_coverage"][symbol] = {
+                "first_coverage": datetime.now().isoformat(),
+                "last_coverage": datetime.now().isoformat(),
+                "total_coverage_updates": 0,
+                "date_ranges": [],
+            }
+
+        symbol_coverage = self.state["feature_coverage"][symbol]
+
+        # Update summary
+        symbol_coverage["last_coverage"] = datetime.now().isoformat()
+        symbol_coverage["total_coverage_updates"] += 1
+
+        # Append date range entry
+        symbol_coverage["date_ranges"].append(
+            {
+                "start_date": date_range[0],
+                "end_date": date_range[1],
+                "feature_types": feature_types,
+                "recorded_at": datetime.now().isoformat(),
+            }
+        )
+
+        # Trim history to last 100 entries
+        if len(symbol_coverage["date_ranges"]) > 100:
+            symbol_coverage["date_ranges"] = symbol_coverage["date_ranges"][-100:]
+
+        self._save_state()
+
+        logger.debug(
+            f"Recorded feature coverage for {symbol}: {feature_types}",
+            extra={
+                "symbol": symbol,
+                "date_range": date_range,
+                "feature_types": feature_types,
+            },
+        )
+
+    def get_feature_coverage(
+        self,
+        symbol: str,
+    ) -> dict[str, Any]:
+        """Get feature coverage stats for symbol (US-029 Phase 2).
+
+        Args:
+            symbol: Stock symbol
+
+        Returns:
+            Dict with feature coverage statistics
+        """
+        feature_coverage = self.state.get("feature_coverage", {})
+        symbol_coverage = feature_coverage.get(symbol)
+
+        if not symbol_coverage:
+            return {
+                "order_book_dates": 0,
+                "options_dates": 0,
+                "macro_dates": 0,
+                "total_coverage_updates": 0,
+                "last_coverage": None,
+            }
+
+        # Count unique dates by feature type
+        order_book_dates = set()
+        options_dates = set()
+        macro_dates = set()
+
+        for date_range_entry in symbol_coverage.get("date_ranges", []):
+            feature_types = date_range_entry.get("feature_types", [])
+            start_date = date_range_entry.get("start_date", "")
+            end_date = date_range_entry.get("end_date", "")
+
+            if "order_book" in feature_types:
+                order_book_dates.add((start_date, end_date))
+            if "options" in feature_types:
+                options_dates.add((start_date, end_date))
+            if "macro" in feature_types:
+                macro_dates.add((start_date, end_date))
+
+        return {
+            "order_book_dates": len(order_book_dates),
+            "options_dates": len(options_dates),
+            "macro_dates": len(macro_dates),
+            "total_coverage_updates": symbol_coverage.get("total_coverage_updates", 0),
+            "last_coverage": symbol_coverage.get("last_coverage"),
+        }
+
+    # =====================================================================
+    # US-029 Phase 4: Provider Metrics Tracking
+    # =====================================================================
+
+    def record_provider_metrics(
+        self,
+        provider_name: str,
+        success: bool,
+        retries: int = 0,
+        latency_ms: float | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        """Record provider-level fetch metrics (US-029 Phase 4).
+
+        Tracks success/error counts, retry attempts, and latency for each provider.
+
+        Args:
+            provider_name: Provider name ("order_book", "options", "macro")
+            success: Whether the fetch succeeded
+            retries: Number of retry attempts
+            latency_ms: Fetch latency in milliseconds
+            error_message: Error message if failed
+        """
+        if "provider_metrics" not in self.state:
+            self.state["provider_metrics"] = {}
+
+        if provider_name not in self.state["provider_metrics"]:
+            self.state["provider_metrics"][provider_name] = {
+                "total_requests": 0,
+                "successful_requests": 0,
+                "failed_requests": 0,
+                "total_retries": 0,
+                "last_success_timestamp": None,
+                "last_error_timestamp": None,
+                "last_error_message": None,
+                "avg_latency_ms": 0.0,
+                "max_latency_ms": 0.0,
+            }
+
+        provider_state = self.state["provider_metrics"][provider_name]
+
+        # Update counts
+        provider_state["total_requests"] += 1
+        if success:
+            provider_state["successful_requests"] += 1
+            provider_state["last_success_timestamp"] = datetime.now().isoformat()
+        else:
+            provider_state["failed_requests"] += 1
+            provider_state["last_error_timestamp"] = datetime.now().isoformat()
+            if error_message:
+                provider_state["last_error_message"] = error_message
+
+        # Update retry count
+        provider_state["total_retries"] += retries
+
+        # Update latency stats (only for requests with latency data)
+        if latency_ms is not None:
+            # Track count of requests with latency separately for accurate averaging
+            if "latency_count" not in provider_state:
+                provider_state["latency_count"] = 0
+
+            current_avg = provider_state["avg_latency_ms"]
+            latency_count = provider_state["latency_count"]
+
+            # Calculate new running average (only for requests with latency)
+            new_avg = ((current_avg * latency_count) + latency_ms) / (latency_count + 1)
+            provider_state["avg_latency_ms"] = round(new_avg, 2)
+            provider_state["latency_count"] = latency_count + 1
+
+            # Update max latency
+            if latency_ms > provider_state["max_latency_ms"]:
+                provider_state["max_latency_ms"] = round(latency_ms, 2)
+
+        self._save_state()
+
+        logger.debug(
+            f"Recorded provider metrics: {provider_name}",
+            extra={
+                "provider": provider_name,
+                "success": success,
+                "retries": retries,
+                "latency_ms": latency_ms,
+            },
+        )
+
+    def get_provider_stats(self, provider_name: str) -> dict[str, Any]:
+        """Get aggregated statistics for a provider (US-029 Phase 4).
+
+        Args:
+            provider_name: Provider name ("order_book", "options", "macro")
+
+        Returns:
+            Dict with provider statistics
+        """
+        provider_metrics = self.state.get("provider_metrics", {})
+        provider_state = provider_metrics.get(provider_name)
+
+        if not provider_state:
+            return {
+                "total_requests": 0,
+                "successful_requests": 0,
+                "failed_requests": 0,
+                "success_rate": 0.0,
+                "total_retries": 0,
+                "avg_latency_ms": 0.0,
+                "max_latency_ms": 0.0,
+                "last_success_timestamp": None,
+                "last_error_timestamp": None,
+                "last_error_message": None,
+            }
+
+        # Calculate success rate
+        total = provider_state["total_requests"]
+        success_rate = (provider_state["successful_requests"] / total * 100) if total > 0 else 0.0
+
+        return {
+            "total_requests": provider_state["total_requests"],
+            "successful_requests": provider_state["successful_requests"],
+            "failed_requests": provider_state["failed_requests"],
+            "success_rate": round(success_rate, 2),
+            "total_retries": provider_state["total_retries"],
+            "avg_latency_ms": provider_state["avg_latency_ms"],
+            "max_latency_ms": provider_state["max_latency_ms"],
+            "last_success_timestamp": provider_state["last_success_timestamp"],
+            "last_error_timestamp": provider_state["last_error_timestamp"],
+            "last_error_message": provider_state["last_error_message"],
+        }
+
+    def get_all_provider_stats(self) -> dict[str, dict[str, Any]]:
+        """Get statistics for all providers (US-029 Phase 4).
+
+        Returns:
+            Dict mapping provider names to their statistics
+        """
+        provider_metrics = self.state.get("provider_metrics", {})
+
+        stats = {}
+        for provider_name in provider_metrics:
+            stats[provider_name] = self.get_provider_stats(provider_name)
+
+        return stats
+
+    # =========================================================================
+    # US-029 Phase 5: Streaming Heartbeat Tracking
+    # =========================================================================
+
+    def record_streaming_heartbeat(
+        self,
+        stream_type: str,
+        symbols: list[str],
+        stats: dict[str, Any],
+    ) -> None:
+        """Record streaming heartbeat for health monitoring (US-029 Phase 5).
+
+        Args:
+            stream_type: Type of stream (e.g., "order_book", "trades")
+            symbols: List of symbols being streamed
+            stats: Current streaming statistics
+        """
+        from datetime import datetime
+
+        if "streaming" not in self.state:
+            self.state["streaming"] = {}
+
+        if stream_type not in self.state["streaming"]:
+            self.state["streaming"][stream_type] = {}
+
+        stream_state = self.state["streaming"][stream_type]
+
+        # Update heartbeat metadata
+        stream_state["last_heartbeat"] = datetime.now().isoformat()
+        stream_state["symbols"] = symbols
+        stream_state["update_count"] = stats.get("updates", 0)
+        stream_state["error_count"] = stats.get("errors", 0)
+        stream_state["is_healthy"] = True  # Will be checked by monitoring
+
+        self._save_state()
+
+    def get_streaming_health(self, stream_type: str) -> dict[str, Any]:
+        """Get streaming health status (US-029 Phase 5).
+
+        Args:
+            stream_type: Type of stream to check
+
+        Returns:
+            Dict with health status: last_heartbeat, is_healthy, time_since_heartbeat_seconds
+        """
+        from datetime import datetime
+
+        streaming_state = self.state.get("streaming", {})
+
+        if stream_type not in streaming_state:
+            return {
+                "exists": False,
+                "is_healthy": False,
+                "reason": "Stream not found",
+            }
+
+        stream = streaming_state[stream_type]
+        last_heartbeat_str = stream.get("last_heartbeat")
+
+        if not last_heartbeat_str:
+            return {
+                "exists": True,
+                "is_healthy": False,
+                "reason": "No heartbeat recorded",
+            }
+
+        # Calculate time since last heartbeat
+        last_heartbeat = datetime.fromisoformat(last_heartbeat_str)
+        now = datetime.now()
+        time_since_seconds = (now - last_heartbeat).total_seconds()
+
+        # Import config to get timeout threshold
+        from src.app.config import settings
+
+        timeout_seconds = settings.streaming_heartbeat_timeout_seconds
+        is_healthy = time_since_seconds < timeout_seconds
+
+        return {
+            "exists": True,
+            "is_healthy": is_healthy,
+            "last_heartbeat": last_heartbeat_str,
+            "time_since_heartbeat_seconds": round(time_since_seconds, 2),
+            "timeout_threshold_seconds": timeout_seconds,
+            "symbols": stream.get("symbols", []),
+            "update_count": stream.get("update_count", 0),
+            "error_count": stream.get("error_count", 0),
+        }
+
+    def get_all_streaming_health(self) -> dict[str, dict[str, Any]]:
+        """Get health status for all active streams (US-029 Phase 5).
+
+        Returns:
+            Dict mapping stream types to their health status
+        """
+        streaming_state = self.state.get("streaming", {})
+
+        health_stats = {}
+        for stream_type in streaming_state:
+            health_stats[stream_type] = self.get_streaming_health(stream_type)
+
+        return health_stats
