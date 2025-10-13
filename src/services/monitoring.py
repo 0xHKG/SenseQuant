@@ -1850,6 +1850,142 @@ class MonitoringService:
         if check_name in self._consecutive_failures:
             del self._consecutive_failures[check_name]
 
+    # =========================================================================
+    # US-029 Phase 5b: Streaming Health Checks
+    # =========================================================================
+
+    def check_streaming_health(self, state_manager: Any) -> list[HealthCheckResult]:
+        """Check health of all active streaming connections (US-029 Phase 5b).
+
+        Monitors streaming lag, buffer utilization, and alerts when:
+        - Lag exceeds streaming_heartbeat_timeout_seconds
+        - Buffer stops updating (no new snapshots)
+        - Error rate is too high
+
+        Args:
+            state_manager: StateManager instance to query streaming health
+
+        Returns:
+            List of HealthCheckResult objects, one per active stream
+        """
+        results = []
+
+        try:
+            all_streams = state_manager.get_all_streaming_health()
+
+            if not all_streams:
+                results.append(
+                    HealthCheckResult(
+                        check_name="streaming",
+                        status="OK",
+                        message="No active streams (streaming disabled or not started)",
+                    )
+                )
+                return results
+
+            for stream_type, health in all_streams.items():
+                check_name = f"streaming_{stream_type}"
+
+                # Check if stream exists and is healthy
+                if not health.get("exists", False):
+                    results.append(
+                        HealthCheckResult(
+                            check_name=check_name,
+                            status="WARNING",
+                            message=f"Stream {stream_type} not found",
+                        )
+                    )
+                    continue
+
+                is_healthy = health.get("is_healthy", False)
+                lag_seconds = health.get("time_since_heartbeat_seconds", 0)
+                threshold = health.get("timeout_threshold_seconds", 30)
+
+                if not is_healthy:
+                    # Track consecutive failures
+                    consecutive_failures = self._get_consecutive_failures(check_name)
+
+                    # Alert escalation based on failure count
+                    if consecutive_failures >= 3:
+                        severity = "CRITICAL"
+                    elif consecutive_failures >= 2:
+                        severity = "WARNING"
+                    else:
+                        severity = "INFO"
+
+                    alert = Alert(
+                        timestamp=datetime.now().isoformat(),
+                        severity=severity,  # type: ignore
+                        rule=f"streaming_lag_{stream_type}",
+                        message=f"Streaming lag for {stream_type}: {lag_seconds:.1f}s (threshold: {threshold}s)",
+                        context={
+                            "stream_type": stream_type,
+                            "lag_seconds": lag_seconds,
+                            "threshold_seconds": threshold,
+                            "consecutive_failures": consecutive_failures,
+                            "symbols": health.get("symbols", []),
+                            "update_count": health.get("update_count", 0),
+                            "error_count": health.get("error_count", 0),
+                        },
+                    )
+                    self.emit_alert(alert)
+
+                    results.append(
+                        HealthCheckResult(
+                            check_name=check_name,
+                            status="ERROR",
+                            message=f"Stream {stream_type} unhealthy: lag {lag_seconds:.1f}s > {threshold}s",
+                            details={
+                                "lag_seconds": lag_seconds,
+                                "threshold_seconds": threshold,
+                                "consecutive_failures": consecutive_failures,
+                                "buffer_utilization_pct": health.get("buffer_utilization_pct", 0),
+                            },
+                        )
+                    )
+                else:
+                    # Reset consecutive failures on success
+                    self._reset_consecutive_failures(check_name)
+
+                    # Check buffer utilization
+                    buffer_util = health.get("buffer_utilization_pct", 0)
+                    if buffer_util > 90:
+                        results.append(
+                            HealthCheckResult(
+                                check_name=check_name,
+                                status="WARNING",
+                                message=f"Stream {stream_type} buffer utilization high: {buffer_util}%",
+                                details={"buffer_utilization_pct": buffer_util},
+                            )
+                        )
+                    else:
+                        results.append(
+                            HealthCheckResult(
+                                check_name=check_name,
+                                status="OK",
+                                message=f"Stream {stream_type} healthy (lag: {lag_seconds:.1f}s, buffer: {buffer_util}%)",
+                                details={
+                                    "lag_seconds": lag_seconds,
+                                    "buffer_utilization_pct": buffer_util,
+                                },
+                            )
+                        )
+
+        except Exception as e:
+            logger.error(
+                f"Failed to check streaming health: {e}",
+                extra={"component": "monitoring", "error": str(e)},
+            )
+            results.append(
+                HealthCheckResult(
+                    check_name="streaming",
+                    status="ERROR",
+                    message=f"Streaming health check failed: {e}",
+                )
+            )
+
+        return results
+
     def _escalate_liveness_failure(
         self,
         event: str,

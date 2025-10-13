@@ -1119,15 +1119,199 @@ if not health["is_healthy"]:
 ### Known Limitations
 - **BreezeWebSocketClient is a placeholder**: Real Breeze SDK WebSocket integration pending
 - **Background ingestion not implemented**: Daemon mode deferred to future work
-- **No DataFeed streaming buffer integration**: Deferred to Phase 5b
-- **No MonitoringService streaming alerts**: Deferred to Phase 5b
 
-### Future Work (Phase 5b - Optional)
+---
+
+## Phase 5b: Streaming DataFeed Integration & Monitoring Alerts ✅
+
+**Status**: **COMPLETED**
+**Implementation Date**: 2025-10-13
+
+### Overview
+Phase 5b extends Phase 5 streaming capabilities with DataFeed integration and monitoring alerts, enabling live strategies to consume real-time market data and alerting on streaming health issues.
+
+### Components Implemented
+
+#### 1. DataFeed Streaming Helpers (`src/services/data_feed.py`)
+**New Functions**:
+
+**`get_latest_order_book(symbol, streaming_cache_dir, fallback_csv_dir)`**:
+- Reads latest snapshot from streaming cache (`data/order_book/streaming/{symbol}/latest.json`)
+- Falls back to CSV cache if streaming disabled or stale
+- Returns order book dict with bids, asks, metadata
+
+**`get_order_book_history(symbol, limit, streaming_cache_dir)`**:
+- Returns recent snapshots from streaming cache (currently 1 from cache file)
+- For full historical buffer, use `OrderBookStreamer.get_buffer_snapshots()` directly
+- Returns list of snapshots (newest first)
+
+**Usage Example**:
+```python
+from src.services.data_feed import get_latest_order_book
+
+# Get latest order book from streaming cache
+snapshot = get_latest_order_book("RELIANCE")
+if snapshot:
+    best_bid = snapshot["bids"][0]["price"]
+    best_ask = snapshot["asks"][0]["price"]
+    spread = best_ask - best_bid
+```
+
+#### 2. StateManager Buffer Metadata (`src/services/state_manager.py`)
+**Enhanced Method**: `record_streaming_heartbeat(..., buffer_metadata)`
+- Now accepts optional `buffer_metadata` dict with:
+  - `buffer_lengths`: Dict[str, int] - Current buffer size per symbol
+  - `last_snapshot_times`: Dict[str, str] - Last snapshot timestamp per symbol
+  - `total_capacity`: int - Buffer capacity (maxlen)
+- Calculates buffer utilization percentage automatically
+- Persists metadata to state file for monitoring
+
+**Enhanced Method**: `get_streaming_health(stream_type)`
+- Returns buffer metadata in health dict:
+  - `buffer_lengths`, `last_snapshot_times`, `total_capacity`, `buffer_utilization_pct`
+
+**Example**:
+```python
+from src.services.state_manager import StateManager
+
+manager = StateManager("data/state/streaming.json")
+health = manager.get_streaming_health("order_book")
+
+print(f"Buffer utilization: {health['buffer_utilization_pct']}%")
+print(f"RELIANCE buffer: {health['buffer_lengths']['RELIANCE']} snapshots")
+```
+
+#### 3. MonitoringService Streaming Health Checks (`src/services/monitoring.py`)
+**New Method**: `check_streaming_health(state_manager)`
+- Monitors all active streaming connections
+- Detects lag exceeding `streaming_heartbeat_timeout_seconds`
+- Warns on high buffer utilization (>90%)
+- Emits alerts with escalating severity (INFO → WARNING → CRITICAL)
+- Returns list of `HealthCheckResult` objects
+
+**Alert Conditions**:
+- **ERROR**: Lag exceeds timeout threshold
+- **WARNING**: Buffer utilization >90% or 2+ consecutive failures
+- **CRITICAL**: 3+ consecutive failures
+- **OK**: Healthy stream with normal buffer utilization
+
+**Usage Example**:
+```python
+from src.services.monitoring import MonitoringService
+from src.services.state_manager import StateManager
+
+monitoring = MonitoringService(settings)
+state_manager = StateManager("data/state/streaming.json")
+
+results = monitoring.check_streaming_health(state_manager)
+for result in results:
+    if result.status == "ERROR":
+        print(f"Alert: {result.message}")
+```
+
+#### 4. Streaming Script Buffer Metadata (`scripts/stream_order_book.py`)
+**New Method**: `OrderBookStreamer._get_buffer_metadata()`
+- Collects current buffer lengths per symbol
+- Extracts last snapshot timestamps from buffers
+- Returns metadata dict for heartbeat tracking
+
+**Enhanced**: Heartbeat recording now includes buffer metadata:
+```python
+buffer_metadata = self._get_buffer_metadata()
+self.state_manager.record_streaming_heartbeat(
+    stream_type="order_book",
+    symbols=self.symbols,
+    stats=self.stats,
+    buffer_metadata=buffer_metadata,
+)
+```
+
+**Periodic Logging**: Logs buffer stats every 100 updates for monitoring
+
+#### 5. Integration Tests (`tests/integration/test_market_streaming.py`)
+**New Tests** (9 total, all passing):
+- `test_data_feed_get_latest_order_book`: DataFeed reads streaming cache
+- `test_data_feed_get_latest_order_book_fallback`: Falls back to CSV cache
+- `test_data_feed_get_order_book_history`: Returns snapshot history
+- `test_state_manager_buffer_metadata`: Buffer metadata persistence
+- `test_monitoring_service_streaming_health_check`: Healthy stream detection
+- `test_monitoring_service_streaming_lag_alert`: Lag detection and alerting
+- `test_monitoring_service_streaming_high_buffer_utilization`: Buffer warnings
+- `test_streaming_integration_with_buffer_metadata`: End-to-end integration
+- `test_monitoring_service_no_active_streams`: Handles no active streams
+
+### Implementation Highlights
+
+**Buffer Metadata Collection**:
+```python
+def _get_buffer_metadata(self) -> dict[str, Any]:
+    buffer_lengths = {}
+    last_snapshot_times = {}
+
+    for symbol, buffer in self.buffers.items():
+        buffer_lengths[symbol] = len(buffer)
+        if buffer:
+            latest = buffer[-1]
+            if isinstance(latest, dict) and "timestamp" in latest:
+                last_snapshot_times[symbol] = latest["timestamp"]
+
+    return {
+        "buffer_lengths": buffer_lengths,
+        "last_snapshot_times": last_snapshot_times,
+        "total_capacity": self.buffer_size,
+    }
+```
+
+**Streaming Health Check with Alerts**:
+```python
+def check_streaming_health(self, state_manager) -> list[HealthCheckResult]:
+    all_streams = state_manager.get_all_streaming_health()
+
+    for stream_type, health in all_streams.items():
+        if not health.get("is_healthy", False):
+            # Track consecutive failures
+            consecutive_failures = self._get_consecutive_failures(check_name)
+
+            # Escalate severity based on failure count
+            if consecutive_failures >= 3:
+                severity = "CRITICAL"
+            elif consecutive_failures >= 2:
+                severity = "WARNING"
+
+            # Emit alert
+            alert = Alert(
+                timestamp=datetime.now().isoformat(),
+                severity=severity,
+                rule=f"streaming_lag_{stream_type}",
+                message=f"Streaming lag: {lag_seconds:.1f}s > {threshold}s",
+                context={...},
+            )
+            self.emit_alert(alert)
+```
+
+### Testing Results
+- **9 new tests added** (100% pass rate)
+- **Total tests**: 603 passing (up from 594)
+- **Coverage**: DataFeed helpers, StateManager buffer metadata, MonitoringService alerts, end-to-end streaming
+
+### Safety Controls
+1. **Streaming disabled by default**: `STREAMING_ENABLED=false`
+2. **Fallback to CSV cache**: DataFeed falls back when streaming unavailable
+3. **Alert escalation**: Gradual severity increase prevents alert fatigue
+4. **Buffer utilization monitoring**: Warns before buffers fill up
+5. **Consecutive failure tracking**: Avoids spurious alerts
+
+### Configuration
+No new configuration added. Uses existing Phase 5 settings:
+- `streaming_heartbeat_timeout_seconds` (default 30s)
+- `streaming_max_consecutive_errors` (default 10)
+- `streaming_buffer_size` (default 100)
+
+### Future Work (Phase 5c - Optional)
 - Real Breeze WebSocket SDK integration
-- DataFeed streaming buffer methods (get_latest_snapshot_from_stream)
-- MonitoringService streaming health alerts
 - Background daemon mode for continuous ingestion
 - WebSocket reconnection logic with exponential backoff
+- Dashboard panels for streaming status visualization
 
 ---
 

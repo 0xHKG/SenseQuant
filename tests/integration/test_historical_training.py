@@ -291,10 +291,132 @@ def test_fetch_all_summary_statistics(mock_settings: Settings, tmp_data_dir: Pat
     assert "failures" in summary
     assert "total_rows" in summary
     assert "cache_hit_rate" in summary
+    assert "chunks_fetched" in summary
+    assert "chunks_failed" in summary
 
-    # For 2 symbols x 2 dates x 1 interval = 4 total requests
-    assert summary["total_requests"] == 4
+    # Verify chunking was used (not day-by-day)
+    assert summary["chunks_fetched"] > 0
     assert summary["downloads"] > 0
+
+
+def test_chunked_historical_fetch_multi_chunk_aggregation(mock_settings: Settings, tmp_data_dir: Path) -> None:
+    """Test chunked ingestion with multi-chunk date range (US-028 Phase 6b).
+
+    This test verifies:
+    1. Date range is split into multiple chunks based on settings.historical_chunk_days
+    2. Each chunk is fetched separately
+    3. Results are combined into a single continuous DataFrame
+    4. Rate limiting is applied between chunks
+    5. Chunk statistics are tracked correctly
+    """
+    from datetime import datetime
+    from unittest.mock import Mock, patch
+
+    # Configure mock settings with small chunk size to force multiple chunks
+    mock_settings.historical_chunk_days = 30  # 30-day chunks
+
+    fetcher = HistoricalDataFetcher(mock_settings, breeze_client=None, dryrun=True)
+
+    # Test date range: 100 days (should create ~4 chunks)
+    start_dt = datetime(2024, 1, 1)
+    end_dt = datetime(2024, 4, 10)  # 100 days
+
+    # Calculate expected chunks
+    expected_chunks = fetcher.split_date_range_into_chunks(start_dt, end_dt)
+    assert len(expected_chunks) >= 3, "Should create at least 3 chunks for 100-day range with 30-day chunks"
+
+    # Verify chunk boundaries are correct
+    assert expected_chunks[0][0] == start_dt
+    assert expected_chunks[-1][1] == end_dt
+
+    # Verify no gaps between chunks
+    for i in range(len(expected_chunks) - 1):
+        chunk_end = expected_chunks[i][1]
+        next_chunk_start = expected_chunks[i + 1][0]
+        assert (next_chunk_start - chunk_end).days == 1, "Chunks should be contiguous"
+
+    # Fetch data using chunked method
+    df = fetcher.fetch_symbol_date_range_chunked(
+        symbol="RELIANCE",
+        start_dt=start_dt,
+        end_dt=end_dt,
+        interval="1day",
+        force=False,
+    )
+
+    # Verify combined DataFrame
+    assert df is not None
+    assert len(df) > 0
+    assert "timestamp" in df.columns
+    assert "open" in df.columns
+    assert "high" in df.columns
+    assert "low" in df.columns
+    assert "close" in df.columns
+    assert "volume" in df.columns
+
+    # Verify no duplicate timestamps (from chunk overlap)
+    assert len(df) == len(df.drop_duplicates(subset=["timestamp"]))
+
+    # Verify timestamps are sorted
+    timestamps = pd.to_datetime(df["timestamp"])
+    assert timestamps.is_monotonic_increasing, "Timestamps should be in ascending order"
+
+    # Verify chunk statistics
+    assert fetcher.stats["chunks_fetched"] == len(expected_chunks)
+    assert fetcher.stats["chunks_failed"] == 0
+    assert fetcher.stats["downloads"] == len(expected_chunks)
+
+
+def test_chunked_fetch_with_mocked_breeze_client(mock_settings: Settings, tmp_data_dir: Path) -> None:
+    """Test chunked fetch with mocked BreezeClient to verify API interactions (US-028 Phase 6b)."""
+    from datetime import datetime
+    from unittest.mock import Mock, patch
+
+    # Configure settings
+    mock_settings.historical_chunk_days = 90
+    mock_settings.breeze_rate_limit_delay_seconds = 0.1  # Fast for testing
+
+    # Create mock BreezeClient
+    mock_breeze = Mock()
+    mock_breeze.fetch_historical_chunk = Mock(return_value=pd.DataFrame({
+        "timestamp": pd.date_range("2024-01-01", periods=10, freq="D"),
+        "open": [2450.0] * 10,
+        "high": [2455.0] * 10,
+        "low": [2448.0] * 10,
+        "close": [2453.0] * 10,
+        "volume": [100000] * 10,
+    }))
+
+    fetcher = HistoricalDataFetcher(mock_settings, breeze_client=mock_breeze, dryrun=False)
+
+    # Fetch 200-day range (should create ~3 chunks with 90-day chunk size)
+    start_dt = datetime(2024, 1, 1)
+    end_dt = datetime(2024, 7, 20)
+
+    df = fetcher.fetch_symbol_date_range_chunked(
+        symbol="RELIANCE",
+        start_dt=start_dt,
+        end_dt=end_dt,
+        interval="1day",
+        force=False,
+    )
+
+    # Verify BreezeClient was called multiple times (once per chunk)
+    expected_chunks = fetcher.split_date_range_into_chunks(start_dt, end_dt)
+    assert mock_breeze.fetch_historical_chunk.call_count == len(expected_chunks)
+
+    # Verify combined result
+    assert len(df) > 0
+    assert fetcher.stats["chunks_fetched"] == len(expected_chunks)
+
+    # Verify each call had correct parameters
+    for i, (chunk_start, chunk_end) in enumerate(expected_chunks):
+        call_args = mock_breeze.fetch_historical_chunk.call_args_list[i]
+        assert call_args[1]["symbol"] == "RELIANCE"
+        assert call_args[1]["interval"] == "1day"
+        # Timestamps should be timezone-aware
+        assert call_args[1]["start_date"].tz is not None
+        assert call_args[1]["end_date"].tz is not None
 
 
 # ============================================================================

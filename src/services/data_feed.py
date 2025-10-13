@@ -870,3 +870,140 @@ def load_macro_data(
     )
 
     return df
+
+
+# =============================================================================
+# US-029 Phase 5b: Streaming DataFeed Integration
+# =============================================================================
+
+
+def get_latest_order_book(
+    symbol: str,
+    streaming_cache_dir: str | Path = "data/order_book/streaming",
+    fallback_csv_dir: str | Path | None = None,
+) -> dict | None:
+    """Get latest order book snapshot from streaming cache or fallback to CSV.
+
+    This function reads the latest order book snapshot written by the streaming
+    script (scripts/stream_order_book.py). If streaming is disabled or the cache
+    is stale, it can optionally fall back to cached CSV snapshots.
+
+    Args:
+        symbol: Stock symbol (e.g., "RELIANCE")
+        streaming_cache_dir: Directory where streaming script writes latest.json
+        fallback_csv_dir: Optional fallback to CSV cache if streaming unavailable
+
+    Returns:
+        Order book snapshot dict with keys:
+            - symbol: str
+            - timestamp: str (ISO format)
+            - bids: list[dict] with price, quantity, orders
+            - asks: list[dict] with price, quantity, orders
+            - metadata: dict with source, dryrun, etc.
+        Returns None if no data available.
+
+    Example:
+        >>> snapshot = get_latest_order_book("RELIANCE")
+        >>> if snapshot:
+        ...     best_bid = snapshot["bids"][0]["price"]
+        ...     best_ask = snapshot["asks"][0]["price"]
+        ...     spread = best_ask - best_bid
+    """
+    streaming_dir = Path(streaming_cache_dir)
+    latest_file = streaming_dir / symbol / "latest.json"
+
+    # Try streaming cache first
+    if latest_file.exists():
+        try:
+            with open(latest_file) as f:
+                data = json.load(f)
+
+            logger.debug(
+                "Loaded latest order book from streaming cache",
+                extra={"component": "data_feed", "symbol": symbol, "source": "streaming"},
+            )
+            return data
+
+        except Exception as e:
+            logger.error(
+                f"Failed to load streaming cache: {e}",
+                extra={"component": "data_feed", "symbol": symbol, "error": str(e)},
+            )
+
+    # Fallback to CSV cache if configured
+    if fallback_csv_dir:
+        csv_dir = Path(fallback_csv_dir)
+        symbol_dir = csv_dir / symbol
+
+        if symbol_dir.exists():
+            # Find most recent snapshot
+            snapshot_files = sorted(symbol_dir.rglob("*.json"), reverse=True)
+            if snapshot_files:
+                try:
+                    with open(snapshot_files[0]) as f:
+                        data = json.load(f)
+
+                    logger.debug(
+                        "Loaded order book from CSV fallback",
+                        extra={
+                            "component": "data_feed",
+                            "symbol": symbol,
+                            "source": "csv_fallback",
+                            "file": str(snapshot_files[0]),
+                        },
+                    )
+                    return data
+
+                except Exception as e:
+                    logger.error(
+                        f"Failed to load CSV fallback: {e}",
+                        extra={"component": "data_feed", "symbol": symbol, "error": str(e)},
+                    )
+
+    logger.warning(
+        f"No order book data available for {symbol}",
+        extra={"component": "data_feed", "symbol": symbol},
+    )
+    return None
+
+
+def get_order_book_history(
+    symbol: str,
+    limit: int = 100,
+    streaming_cache_dir: str | Path = "data/order_book/streaming",
+) -> list[dict]:
+    """Get recent order book snapshots from streaming buffer.
+
+    Note: This function only accesses the latest snapshot from the streaming cache.
+    For full historical buffer access, use the OrderBookStreamer.get_buffer_snapshots()
+    method directly, which maintains an in-memory circular buffer.
+
+    Args:
+        symbol: Stock symbol
+        limit: Max snapshots to return (only 1 available from cache file)
+        streaming_cache_dir: Directory where streaming script writes latest.json
+
+    Returns:
+        List of order book snapshots (newest first), limited to 1 from cache file.
+        Empty list if no data available.
+
+    Example:
+        >>> history = get_order_book_history("RELIANCE", limit=10)
+        >>> if history:
+        ...     latest = history[0]  # Most recent
+        ...     print(f"Latest snapshot at {latest['timestamp']}")
+    """
+    latest = get_latest_order_book(symbol, streaming_cache_dir, fallback_csv_dir=None)
+
+    if latest:
+        logger.debug(
+            "Retrieved order book history (1 snapshot from cache)",
+            extra={"component": "data_feed", "symbol": symbol, "count": 1},
+        )
+        return [latest]
+
+    logger.debug(
+        "No order book history available",
+        extra={"component": "data_feed", "symbol": symbol},
+    )
+    return []

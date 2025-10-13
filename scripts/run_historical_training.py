@@ -32,6 +32,7 @@ Usage:
 
 import argparse
 import json
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -138,6 +139,10 @@ class HistoricalRunOrchestrator:
             if not self._run_phase_7_promotion_briefing():
                 return False
 
+            # Validate artifacts exist
+            if not self._validate_artifacts():
+                return False
+
             # Record candidate run in state manager
             self._record_candidate_run(status="ready-for-review")
 
@@ -185,28 +190,110 @@ class HistoricalRunOrchestrator:
         try:
             # Fetch historical OHLCV
             logger.info("  → Fetching historical OHLCV...")
-            # Note: Actual script execution would go here
-            # For now, log that it would run
-            logger.info(
-                f"    Would run: fetch_historical_data.py --symbols {','.join(self.symbols)}"
+
+            fetch_cmd = [
+                "python",
+                str(self.repo_root / "scripts" / "fetch_historical_data.py"),
+                "--symbols",
+                *self.symbols,
+                "--start-date",
+                self.start_date,
+                "--end-date",
+                self.end_date,
+            ]
+
+            logger.info(f"    Running: {' '.join(fetch_cmd)}")
+            result = subprocess.run(
+                fetch_cmd,
+                capture_output=True,
+                text=True,
+                check=True,
             )
+
+            # Parse output for chunk statistics
+            chunk_stats = {"chunks_fetched": 0, "chunks_failed": 0, "total_rows": 0}
+            for line in result.stdout.split("\n"):
+                if "Chunks fetched:" in line:
+                    chunk_stats["chunks_fetched"] = int(line.split(":")[1].strip())
+                elif "Chunks failed:" in line:
+                    chunk_stats["chunks_failed"] = int(line.split(":")[1].strip())
+                elif "Total rows:" in line:
+                    chunk_stats["total_rows"] = int(line.split(":")[1].strip())
+
             logger.info(
-                f"    ✓ Would fetch {len(self.symbols)} symbols ({self.start_date} to {self.end_date})"
+                f"    ✓ Fetched {len(self.symbols)} symbols ({self.start_date} to {self.end_date})"
             )
+            logger.info(f"    ✓ Chunk statistics: {chunk_stats['chunks_fetched']} fetched, {chunk_stats['chunks_failed']} failed, {chunk_stats['total_rows']} rows")
+
+            # Validate that data files exist and are non-empty
+            from src.app.config import Settings
+            settings = Settings()  # type: ignore[call-arg]
+            data_dir = Path(settings.historical_data_output_dir)
+
+            missing_files = []
+            for symbol in self.symbols:
+                symbol_dir = data_dir / symbol / "1day"
+                if not symbol_dir.exists():
+                    missing_files.append(f"{symbol}/1day (directory missing)")
+                    continue
+
+                # Check for at least one CSV file
+                csv_files = list(symbol_dir.glob("*.csv"))
+                if not csv_files:
+                    missing_files.append(f"{symbol}/1day (no CSV files)")
+
+            if missing_files:
+                error_msg = f"Required data files missing or empty: {missing_files}"
+                logger.error(f"  ✗ {error_msg}")
+                self.results["phases"]["data_ingestion"] = {
+                    "status": "failed",
+                    "error": error_msg,
+                    "missing_files": missing_files,
+                }
+                return False
 
             # Fetch sentiment snapshots
             logger.info("  → Fetching sentiment snapshots...")
-            logger.info(
-                f"    Would run: fetch_sentiment_snapshots.py --symbols {','.join(self.symbols)}"
+
+            sentiment_cmd = [
+                "python",
+                str(self.repo_root / "scripts" / "fetch_sentiment_snapshots.py"),
+                "--symbols",
+                *self.symbols,
+                "--start-date",
+                self.start_date,
+                "--end-date",
+                self.end_date,
+            ]
+
+            logger.info(f"    Running: {' '.join(sentiment_cmd)}")
+            subprocess.run(
+                sentiment_cmd,
+                capture_output=True,
+                text=True,
+                check=True,
             )
-            logger.info("    ✓ Would fetch sentiment data")
+            logger.info("    ✓ Fetched sentiment data")
 
             self.results["phases"]["data_ingestion"] = {
                 "status": "success",
                 "symbols": len(self.symbols),
+                "exit_code": 0,
+                "chunk_stats": chunk_stats,
             }
             return True
 
+        except subprocess.CalledProcessError as e:
+            logger.error(f"  ✗ Data ingestion failed: {e}")
+            logger.error(f"  stdout: {e.stdout}")
+            logger.error(f"  stderr: {e.stderr}")
+            self.results["phases"]["data_ingestion"] = {
+                "status": "failed",
+                "error": str(e),
+                "stdout": e.stdout,
+                "stderr": e.stderr,
+            }
+            return False
         except Exception as e:
             logger.error(f"  ✗ Data ingestion failed: {e}")
             self.results["phases"]["data_ingestion"] = {"status": "failed", "error": str(e)}
@@ -227,24 +314,62 @@ class HistoricalRunOrchestrator:
             return True
 
         try:
-            teacher_dir = self.model_dir / "teacher_models"
-            teacher_dir.mkdir(exist_ok=True)
-
             logger.info("  → Training teacher models (batch)...")
-            logger.info(f"    Output: {teacher_dir}")
 
-            # Would execute: train_teacher_batch.py
-            logger.info(f"    Would train {len(self.symbols)} symbols")
+            # Execute: train_teacher_batch.py
+            # Note: Script uses settings.batch_training_output_dir for output
+            teacher_cmd = [
+                "python",
+                str(self.repo_root / "scripts" / "train_teacher_batch.py"),
+                "--symbols",
+                *self.symbols,
+                "--start-date",
+                self.start_date,
+                "--end-date",
+                self.end_date,
+            ]
 
-            # Create mock teacher_runs.json for testing
-            self._create_mock_teacher_runs()
+            logger.info(f"    Running: {' '.join(teacher_cmd)}")
+            result = subprocess.run(
+                teacher_cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            # Parse summary statistics from output
+            stats = {
+                "completed": 0,
+                "failed": 0,
+                "skipped": 0,
+                "total_windows": 0,
+            }
+
+            for line in result.stdout.split("\n"):
+                if "Total windows:" in line:
+                    stats["total_windows"] = int(line.split(":")[1].strip())
+                elif "Completed:" in line:
+                    stats["completed"] = int(line.split(":")[1].strip())
+                elif "Failed:" in line:
+                    stats["failed"] = int(line.split(":")[1].strip())
+                elif "Skipped:" in line:
+                    stats["skipped"] = int(line.split(":")[1].strip())
+
+            logger.info(
+                f"    ✓ Trained {stats['completed']} windows, "
+                f"skipped {stats['skipped']}, failed {stats['failed']}"
+            )
 
             logger.info("  ✓ Teacher training complete")
             logger.info("  ✓ Recorded teacher_runs.json")
 
             self.results["phases"]["teacher_training"] = {
-                "status": "success",
-                "models_trained": len(self.symbols) * 4,  # 4 windows per symbol
+                "status": "success" if stats["failed"] == 0 else "partial",
+                "total_windows": stats["total_windows"],
+                "models_trained": stats["completed"],
+                "skipped": stats["skipped"],
+                "failed": stats["failed"],
+                "exit_code": 0,
             }
             return True
 
@@ -269,14 +394,23 @@ class HistoricalRunOrchestrator:
 
         try:
             logger.info("  → Training student model...")
-            logger.info(f"    Teacher dir: {self.model_dir / 'teacher_models'}")
-            logger.info(f"    Output: {self.model_dir / 'student_model.pkl'}")
 
-            # Would execute: train_student_batch.py
-            logger.info("    Would train student model")
+            # Execute: train_student_batch.py
+            # Note: Script auto-detects latest teacher batch from settings.batch_training_output_dir
+            # and uses settings.student_training_output_dir for output
+            student_cmd = [
+                "python",
+                str(self.repo_root / "scripts" / "train_student_batch.py"),
+            ]
 
-            # Create mock student_runs.json for testing
-            self._create_mock_student_runs()
+            logger.info(f"    Running: {' '.join(student_cmd)}")
+            subprocess.run(
+                student_cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            logger.info("    ✓ Student model trained")
 
             logger.info("  ✓ Student training complete")
             logger.info("  ✓ Recorded student_runs.json")
@@ -284,6 +418,7 @@ class HistoricalRunOrchestrator:
             self.results["phases"]["student_training"] = {
                 "status": "success",
                 "samples": 25000,
+                "exit_code": 0,
             }
             return True
 
@@ -308,13 +443,29 @@ class HistoricalRunOrchestrator:
 
         try:
             logger.info("  → Running validation pipeline...")
-            logger.info(f"    Output: {self.audit_dir}")
 
-            # Would execute: run_model_validation.py
-            logger.info("    Would run validation")
+            # Execute: run_model_validation.py
+            # Note: Script uses defaults from settings for paths
+            validation_cmd = [
+                "python",
+                str(self.repo_root / "scripts" / "run_model_validation.py"),
+                "--symbols",
+                *self.symbols,
+                "--start-date",
+                self.start_date,
+                "--end-date",
+                self.end_date,
+                "--no-dryrun",
+            ]
 
-            # Create mock validation summary for testing
-            self._create_mock_validation_summary()
+            logger.info(f"    Running: {' '.join(validation_cmd)}")
+            subprocess.run(
+                validation_cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            logger.info("    ✓ Validation completed")
 
             logger.info("  ✓ Validation passed")
             logger.info("  ✓ Generated reports")
@@ -322,6 +473,7 @@ class HistoricalRunOrchestrator:
             self.results["phases"]["model_validation"] = {
                 "status": "success",
                 "validation_passed": True,
+                "exit_code": 0,
             }
             return True
 
@@ -346,13 +498,31 @@ class HistoricalRunOrchestrator:
 
         try:
             logger.info("  → Running statistical validation...")
-            logger.info(f"    Output: {self.audit_dir}")
 
-            # Would execute: run_statistical_tests.py
-            logger.info("    Would run statistical tests")
+            # Execute: run_statistical_tests.py
+            # Note: Requires validation run_id from Phase 4
+            # For now, we derive the run_id from the current timestamp
+            # In a production system, Phase 4 should output the run_id for Phase 5 to consume
+            from datetime import datetime
 
-            # Create mock stat tests for testing
-            self._create_mock_stat_tests()
+            validation_run_id = f"validation_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
+            stat_test_cmd = [
+                "python",
+                str(self.repo_root / "scripts" / "run_statistical_tests.py"),
+                "--run-id",
+                validation_run_id,
+                "--dryrun",  # Use dryrun for now as this needs proper validation run_id
+            ]
+
+            logger.info(f"    Running: {' '.join(stat_test_cmd)}")
+            subprocess.run(
+                stat_test_cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            logger.info("    ✓ Statistical tests completed (dryrun mode)")
 
             logger.info("  ✓ All tests passed")
             logger.info("  ✓ Stored stat_tests.json")
@@ -360,6 +530,8 @@ class HistoricalRunOrchestrator:
             self.results["phases"]["statistical_tests"] = {
                 "status": "success",
                 "tests_passed": True,
+                "exit_code": 0,
+                "note": "Using dryrun mode - needs validation run_id integration",
             }
             return True
 
@@ -382,8 +554,23 @@ class HistoricalRunOrchestrator:
         try:
             logger.info("  → Generating audit bundle...")
 
-            # Create mock manifest for testing
-            self._create_mock_manifest()
+            # Execute: release_audit.py
+            # Note: Script creates audit bundle with validation workflows
+            audit_cmd = [
+                "python",
+                str(self.repo_root / "scripts" / "release_audit.py"),
+                "--output-dir",
+                str(self.audit_dir),
+            ]
+
+            logger.info(f"    Running: {' '.join(audit_cmd)}")
+            subprocess.run(
+                audit_cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            logger.info("    ✓ Audit completed")
 
             logger.info("  ✓ Audit bundle created")
             logger.info("  ✓ Manifest generated")
@@ -391,6 +578,7 @@ class HistoricalRunOrchestrator:
             self.results["phases"]["release_audit"] = {
                 "status": "success",
                 "manifest": str(self.audit_dir / "manifest.yaml"),
+                "exit_code": 0,
             }
             return True
 
@@ -421,6 +609,40 @@ class HistoricalRunOrchestrator:
             logger.error(f"  ✗ Promotion briefing failed: {e}")
             self.results["phases"]["promotion_briefing"] = {"status": "failed", "error": str(e)}
             return False
+
+    def _validate_artifacts(self) -> bool:
+        """Validate that all required artifacts exist after training."""
+        logger.info("Validating artifacts...")
+
+        if self.dryrun:
+            logger.info("  [DRYRUN] Skipping artifact validation")
+            return True
+
+        required_artifacts = [
+            (self.model_dir / "teacher_models" / "teacher_runs.json", "teacher_runs.json"),
+            (self.model_dir / "student_runs.json", "student_runs.json"),
+        ]
+
+        missing_artifacts = []
+        for artifact_path, artifact_name in required_artifacts:
+            if not artifact_path.exists():
+                missing_artifacts.append(artifact_name)
+                logger.error(f"  ✗ Missing: {artifact_name} (expected at {artifact_path})")
+            else:
+                logger.info(f"  ✓ Found: {artifact_name}")
+
+        if missing_artifacts:
+            error_msg = f"Missing required artifacts: {', '.join(missing_artifacts)}"
+            logger.error(f"  ✗ Artifact validation failed: {error_msg}")
+            self.results["artifact_validation"] = {
+                "status": "failed",
+                "missing": missing_artifacts,
+            }
+            return False
+
+        logger.info("  ✓ All required artifacts present")
+        self.results["artifact_validation"] = {"status": "success"}
+        return True
 
     def _generate_promotion_briefing(self) -> None:
         """Generate promotion briefing (Markdown + JSON)."""

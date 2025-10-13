@@ -154,12 +154,22 @@ class OrderBookStreamer:
                 if update:
                     self._process_update(update)
 
-                # Record heartbeat
+                # Record heartbeat with buffer metadata (US-029 Phase 5b)
+                buffer_metadata = self._get_buffer_metadata()
                 self.state_manager.record_streaming_heartbeat(
                     stream_type="order_book",
                     symbols=self.symbols,
                     stats=self.stats,
+                    buffer_metadata=buffer_metadata,
                 )
+
+                # Log buffer stats periodically (every 100 updates)
+                update_count = self.stats["updates"]
+                if isinstance(update_count, int) and update_count % 100 == 0:
+                    logger.info(
+                        f"Buffer stats: {buffer_metadata['buffer_lengths']}",
+                        extra={"component": "streaming", "buffer_metadata": buffer_metadata},
+                    )
 
             except Exception as e:
                 logger.error(f"Streaming error: {e}", extra={"component": "streaming"})
@@ -257,6 +267,30 @@ class OrderBookStreamer:
         if limit:
             return snapshots[:limit]
         return snapshots
+
+    def _get_buffer_metadata(self) -> dict[str, Any]:
+        """Get current buffer metadata for heartbeat tracking (US-029 Phase 5b).
+
+        Returns:
+            Dict with buffer_lengths, last_snapshot_times, total_capacity
+        """
+        buffer_lengths = {}
+        last_snapshot_times = {}
+
+        for symbol, buffer in self.buffers.items():
+            buffer_lengths[symbol] = len(buffer)
+
+            # Get last snapshot timestamp if buffer not empty
+            if buffer:
+                latest = buffer[-1]
+                if isinstance(latest, dict) and "timestamp" in latest:
+                    last_snapshot_times[symbol] = latest["timestamp"]
+
+        return {
+            "buffer_lengths": buffer_lengths,
+            "last_snapshot_times": last_snapshot_times,
+            "total_capacity": self.buffer_size,
+        }
 
 
 class MockWebSocketClient:

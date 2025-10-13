@@ -107,7 +107,8 @@ def test_latest_price_transient_retry(client_live, mock_breeze_sdk):
 def test_historical_bars_normalization(client_live, mock_breeze_sdk):
     """Test bar normalization with IST timezone."""
     mock_instance = mock_breeze_sdk.return_value
-    mock_instance.get_historical_data.return_value = {
+    # Mock v2 API (now used by historical_bars)
+    mock_instance.get_historical_data_v2.return_value = {
         "Status": 200,
         "Success": [
             {
@@ -136,7 +137,7 @@ def test_historical_bars_normalization(client_live, mock_breeze_sdk):
 def test_historical_bars_empty_safe(client_live, mock_breeze_sdk):
     """Test empty result returns empty list without crash."""
     mock_instance = mock_breeze_sdk.return_value
-    mock_instance.get_historical_data.return_value = {"Status": 200, "Success": []}
+    mock_instance.get_historical_data_v2.return_value = {"Status": 200, "Success": []}
 
     client_live._client = mock_instance
     start = pd.Timestamp("2025-01-01 09:15", tz="Asia/Kolkata")
@@ -145,6 +146,84 @@ def test_historical_bars_empty_safe(client_live, mock_breeze_sdk):
     bars = client_live.historical_bars("RELIANCE", "1minute", start, end)
 
     assert bars == []
+
+
+# ============================================================================
+# Test 6b-6d: fetch_historical_chunk (US-028 Phase 6b)
+# ============================================================================
+
+
+def test_fetch_historical_chunk_success(client_live, mock_breeze_sdk):
+    """Test fetch_historical_chunk with successful data."""
+    mock_instance = mock_breeze_sdk.return_value
+    mock_instance.get_historical_data_v2.return_value = {
+        "Status": 200,
+        "Success": [
+            {
+                "datetime": "2024-01-01 09:15:00",
+                "open": 100.0,
+                "high": 105.0,
+                "low": 99.0,
+                "close": 103.0,
+                "volume": 10000,
+            },
+            {
+                "datetime": "2024-01-02 09:15:00",
+                "open": 103.0,
+                "high": 108.0,
+                "low": 102.0,
+                "close": 106.0,
+                "volume": 12000,
+            },
+        ],
+    }
+
+    client_live._client = mock_instance
+    df = client_live.fetch_historical_chunk(
+        "RELIANCE",
+        pd.Timestamp("2024-01-01", tz="UTC"),
+        pd.Timestamp("2024-01-31", tz="UTC"),
+        interval="1day",
+    )
+
+    assert not df.empty
+    assert "timestamp" in df.columns
+    assert "open" in df.columns
+    assert "high" in df.columns
+    assert "low" in df.columns
+    assert "close" in df.columns
+    assert "volume" in df.columns
+    assert len(df) == 2
+    assert df.iloc[0]["close"] == 103.0
+    assert df.iloc[1]["close"] == 106.0
+
+
+def test_fetch_historical_chunk_empty(client_live, mock_breeze_sdk):
+    """Test fetch_historical_chunk with no data returns empty DataFrame."""
+    mock_instance = mock_breeze_sdk.return_value
+    mock_instance.get_historical_data_v2.return_value = {"Status": 200, "Success": []}
+
+    client_live._client = mock_instance
+    df = client_live.fetch_historical_chunk(
+        "RELIANCE",
+        pd.Timestamp("2024-01-01", tz="UTC"),
+        pd.Timestamp("2024-01-31", tz="UTC"),
+    )
+
+    assert df.empty
+    assert isinstance(df, pd.DataFrame)
+
+
+def test_fetch_historical_chunk_dry_run(client_dryrun):
+    """Test fetch_historical_chunk in dry-run mode returns empty DataFrame."""
+    df = client_dryrun.fetch_historical_chunk(
+        "RELIANCE",
+        pd.Timestamp("2024-01-01", tz="UTC"),
+        pd.Timestamp("2024-01-31", tz="UTC"),
+    )
+
+    assert df.empty
+    assert isinstance(df, pd.DataFrame)
 
 
 # ============================================================================

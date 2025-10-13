@@ -11,8 +11,12 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import datetime
+from pathlib import Path
 
 from loguru import logger
+
+# Add project root to sys.path when executed directly
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.adapters.breeze_client import BreezeClient
 from src.app.config import settings
@@ -99,6 +103,12 @@ def parse_args() -> argparse.Namespace:
         help="Learning rate for LightGBM",
     )
 
+    parser.add_argument(
+        "--dryrun",
+        action="store_true",
+        help="Force dry-run mode (mock data) regardless of MODE setting",
+    )
+
     return parser.parse_args()
 
 
@@ -174,12 +184,21 @@ def main() -> None:
 
     # Initialize BreezeClient
     try:
+        # Determine dry_run mode: CLI flag overrides, else respect settings.mode
+        use_dry_run = args.dryrun if args.dryrun else (settings.mode != "live")
+
         logger.info("Initializing BreezeClient...")
+        logger.info(f"MODE: {'DRYRUN (mock data)' if use_dry_run else 'LIVE (real data)'}")
+        if args.dryrun:
+            logger.info("  → Forced by --dryrun flag")
+        else:
+            logger.info(f"  → Determined by MODE={settings.mode} in .env")
+
         client = BreezeClient(
             api_key=settings.breeze_api_key,
             api_secret=settings.breeze_api_secret,
             session_token=settings.breeze_session_token,
-            dry_run=True,  # Always use dry_run for teacher training
+            dry_run=use_dry_run,
         )
         client.authenticate()
     except Exception as e:

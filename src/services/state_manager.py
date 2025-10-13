@@ -1269,13 +1269,18 @@ class StateManager:
         stream_type: str,
         symbols: list[str],
         stats: dict[str, Any],
+        buffer_metadata: dict[str, Any] | None = None,
     ) -> None:
-        """Record streaming heartbeat for health monitoring (US-029 Phase 5).
+        """Record streaming heartbeat for health monitoring (US-029 Phase 5/5b).
 
         Args:
             stream_type: Type of stream (e.g., "order_book", "trades")
             symbols: List of symbols being streamed
-            stats: Current streaming statistics
+            stats: Current streaming statistics (updates, errors, last_heartbeat)
+            buffer_metadata: Optional buffer metadata dict with:
+                - buffer_lengths: dict[str, int] - Current buffer size per symbol
+                - last_snapshot_times: dict[str, str] - Last snapshot timestamp per symbol
+                - total_capacity: int - Total buffer capacity
         """
         from datetime import datetime
 
@@ -1293,6 +1298,20 @@ class StateManager:
         stream_state["update_count"] = stats.get("updates", 0)
         stream_state["error_count"] = stats.get("errors", 0)
         stream_state["is_healthy"] = True  # Will be checked by monitoring
+
+        # Store buffer metadata (US-029 Phase 5b)
+        if buffer_metadata:
+            stream_state["buffer_lengths"] = buffer_metadata.get("buffer_lengths", {})
+            stream_state["last_snapshot_times"] = buffer_metadata.get("last_snapshot_times", {})
+            stream_state["total_capacity"] = buffer_metadata.get("total_capacity", 0)
+
+            # Calculate buffer utilization percentage
+            if stream_state["total_capacity"] > 0:
+                total_used = sum(stream_state["buffer_lengths"].values())
+                total_max = stream_state["total_capacity"] * len(symbols)
+                stream_state["buffer_utilization_pct"] = round(
+                    (total_used / total_max * 100) if total_max > 0 else 0, 2
+                )
 
         self._save_state()
 
@@ -1337,7 +1356,7 @@ class StateManager:
         timeout_seconds = settings.streaming_heartbeat_timeout_seconds
         is_healthy = time_since_seconds < timeout_seconds
 
-        return {
+        health_dict = {
             "exists": True,
             "is_healthy": is_healthy,
             "last_heartbeat": last_heartbeat_str,
@@ -1347,6 +1366,18 @@ class StateManager:
             "update_count": stream.get("update_count", 0),
             "error_count": stream.get("error_count", 0),
         }
+
+        # Include buffer metadata if available (US-029 Phase 5b)
+        if "buffer_lengths" in stream:
+            health_dict["buffer_lengths"] = stream["buffer_lengths"]
+        if "last_snapshot_times" in stream:
+            health_dict["last_snapshot_times"] = stream["last_snapshot_times"]
+        if "total_capacity" in stream:
+            health_dict["total_capacity"] = stream["total_capacity"]
+        if "buffer_utilization_pct" in stream:
+            health_dict["buffer_utilization_pct"] = stream["buffer_utilization_pct"]
+
+        return health_dict
 
     def get_all_streaming_health(self) -> dict[str, dict[str, Any]]:
         """Get health status for all active streams (US-029 Phase 5).

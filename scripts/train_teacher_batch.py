@@ -27,12 +27,14 @@ import json
 import subprocess
 import sys
 import time
+import traceback
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
+import pandas as pd  # type: ignore[import-untyped]
 from loguru import logger
 
 # Add parent directory to path for imports
@@ -132,9 +134,13 @@ class BatchTrainer:
 
                 # Only add if window is at least 7 days
                 if (current_end - current_start).days >= 7:
-                    # Generate window label (e.g., "RELIANCE_2024Q1")
-                    quarter = (current_start.month - 1) // 3 + 1
-                    window_label = f"{symbol}_{current_start.year}Q{quarter}"
+                    # Generate deterministic window label with explicit dates
+                    # Format: SYMBOL_YYYY-MM-DD_to_YYYY-MM-DD
+                    # This ensures uniqueness even when windows don't align with quarters
+                    window_label = (
+                        f"{symbol}_{current_start.strftime('%Y-%m-%d')}_to_"
+                        f"{current_end.strftime('%Y-%m-%d')}"
+                    )
 
                     tasks.append(
                         {
@@ -163,6 +169,81 @@ class BatchTrainer:
         artifacts_path = Path(task["artifacts_path"])
         # Check for common teacher artifacts
         return (artifacts_path / "labels.csv").exists()
+
+    def get_latest_available_timestamp(self, symbol: str) -> datetime | None:
+        """Get the latest available timestamp for a symbol from cached data.
+
+        Args:
+            symbol: Stock symbol
+
+        Returns:
+            Latest timestamp or None if no data found
+        """
+        data_dir = Path(self.settings.historical_data_output_dir) / symbol / "1day"
+
+        if not data_dir.exists():
+            return None
+
+        # Find all CSV files
+        csv_files = sorted(data_dir.glob("*.csv"))
+        if not csv_files:
+            return None
+
+        # Load the last file (sorted by name = sorted by date)
+        try:
+            df = pd.read_csv(csv_files[-1])
+            if len(df) == 0 or "timestamp" not in df.columns:
+                return None
+
+            # Parse timestamp (handles both formats)
+            last_ts = pd.to_datetime(df["timestamp"].iloc[-1], format="ISO8601")
+            return last_ts.to_pydatetime()  # type: ignore[no-any-return]
+        except Exception as e:
+            logger.warning(
+                f"Failed to read latest timestamp for {symbol}: {e}",
+                extra={"component": "batch_trainer"},
+            )
+            return None
+
+    def should_skip_window_insufficient_data(
+        self, task: dict[str, Any], forecast_horizon: int
+    ) -> tuple[bool, str]:
+        """Check if a window should be skipped due to insufficient future data.
+
+        Args:
+            task: Training task dict
+            forecast_horizon: Forward-looking label window in days
+
+        Returns:
+            Tuple of (should_skip, reason)
+        """
+        symbol = task["symbol"]
+        end_date = datetime.strptime(task["end_date"], "%Y-%m-%d")
+
+        # Get latest available data
+        latest_ts = self.get_latest_available_timestamp(symbol)
+
+        if latest_ts is None:
+            reason = f"No historical data found for {symbol}"
+            return True, reason
+
+        # Remove timezone info for comparison
+        if latest_ts.tzinfo is not None:
+            latest_ts = latest_ts.replace(tzinfo=None)
+
+        # Calculate required future date for label generation
+        required_future_date = end_date + timedelta(days=forecast_horizon)
+
+        # Check if we have enough future data
+        if required_future_date > latest_ts:
+            days_short = (required_future_date - latest_ts).days
+            reason = (
+                f"Insufficient future data: need data through {required_future_date.date()}, "
+                f"but only have through {latest_ts.date()} ({days_short} days short)"
+            )
+            return True, reason
+
+        return False, ""
 
     def train_window(
         self,
@@ -215,25 +296,73 @@ class BatchTrainer:
                     "metrics": self._extract_metrics_from_output(result.stdout),
                 }
             else:
-                logger.error(f"✗ {window_label} failed: {result.stderr}")
+                # Capture full error details from subprocess
+                error_message = result.stderr.strip() if result.stderr else "No stderr output"
+                stdout_tail = result.stdout[-500:] if result.stdout else ""
+
+                # Log detailed error with window context
+                logger.error(
+                    f"✗ {window_label} failed (exit code {result.returncode})",
+                    extra={
+                        "component": "batch_trainer",
+                        "window_label": window_label,
+                        "symbol": symbol,
+                        "exit_code": result.returncode,
+                    },
+                )
+                logger.error(f"  stderr: {error_message}")
+                if stdout_tail:
+                    logger.error(f"  stdout (last 500 chars): {stdout_tail}")
+
                 return {
                     "status": "failed",
-                    "error": result.stderr[:500],  # Truncate long errors
+                    "error": error_message,
+                    "error_detail": {
+                        "exit_code": result.returncode,
+                        "stderr": error_message,
+                        "stdout_tail": stdout_tail,
+                    },
                     "metrics": None,
                 }
 
         except subprocess.TimeoutExpired:
-            logger.error(f"✗ {window_label} timed out")
+            error_message = f"Training timeout ({600}s exceeded)"
+            logger.error(
+                f"✗ {window_label} timed out",
+                extra={
+                    "component": "batch_trainer",
+                    "window_label": window_label,
+                    "symbol": symbol,
+                },
+            )
             return {
                 "status": "failed",
-                "error": "Training timeout (10 minutes exceeded)",
+                "error": error_message,
+                "error_detail": {"timeout_seconds": 600},
                 "metrics": None,
             }
         except Exception as e:
-            logger.error(f"✗ {window_label} error: {e}")
+            # Capture full traceback for unexpected exceptions
+            tb_str = traceback.format_exc()
+            error_message = f"{type(e).__name__}: {str(e)}"
+
+            logger.error(
+                f"✗ {window_label} error: {error_message}",
+                extra={
+                    "component": "batch_trainer",
+                    "window_label": window_label,
+                    "symbol": symbol,
+                },
+            )
+            logger.error(f"  Traceback:\n{tb_str}")
+
             return {
                 "status": "failed",
-                "error": str(e),
+                "error": error_message,
+                "error_detail": {
+                    "exception_type": type(e).__name__,
+                    "traceback": tb_str,
+                },
                 "metrics": None,
             }
 
@@ -480,6 +609,33 @@ class BatchTrainer:
         for i, task in enumerate(tasks, 1):
             logger.info(f"[{i}/{len(tasks)}] Processing {task['window_label']}")
 
+            # Check if window should be skipped due to insufficient future data
+            should_skip, skip_reason = self.should_skip_window_insufficient_data(
+                task, forecast_horizon
+            )
+
+            if should_skip:
+                logger.warning(
+                    f"⊘ {task['window_label']} skipped: {skip_reason}",
+                    extra={
+                        "component": "batch_trainer",
+                        "status": "skipped",
+                        "reason": "insufficient_future_data",
+                    },
+                )
+
+                # Log skip metadata
+                skip_result = {
+                    "status": "skipped",
+                    "reason": skip_reason,
+                    "metrics": None,
+                }
+                self.log_metadata(task, skip_result)
+
+                # Update stats
+                self.stats["skipped"] += 1
+                continue
+
             # Train window with retry
             result = self.train_window_with_retry(task, forecast_horizon)
 
@@ -489,6 +645,8 @@ class BatchTrainer:
             # Update stats
             if result["status"] == "success":
                 self.stats["completed"] += 1
+            elif result["status"] == "skipped":
+                self.stats["skipped"] += 1
             else:
                 self.stats["failed"] += 1
 
@@ -503,8 +661,40 @@ class BatchTrainer:
             tasks: List of training tasks
             forecast_horizon: Forecast horizon in days
         """
+        # Pre-filter tasks to skip those with insufficient data
+        tasks_to_run = []
+        for task in tasks:
+            should_skip, skip_reason = self.should_skip_window_insufficient_data(
+                task, forecast_horizon
+            )
+
+            if should_skip:
+                logger.warning(
+                    f"⊘ {task['window_label']} skipped: {skip_reason}",
+                    extra={
+                        "component": "batch_trainer",
+                        "status": "skipped",
+                        "reason": "insufficient_future_data",
+                    },
+                )
+
+                # Log skip metadata
+                skip_result = {
+                    "status": "skipped",
+                    "reason": skip_reason,
+                    "metrics": None,
+                }
+                self.log_metadata(task, skip_result)
+                self.stats["skipped"] += 1
+            else:
+                tasks_to_run.append(task)
+
+        if not tasks_to_run:
+            logger.warning("No tasks to run after skipping windows with insufficient data")
+            return
+
         with ProcessPoolExecutor(max_workers=self.workers) as executor:
-            # Submit all tasks
+            # Submit filtered tasks
             future_to_task = {
                 executor.submit(
                     self._train_window_worker,
@@ -512,7 +702,7 @@ class BatchTrainer:
                     forecast_horizon,
                     self.settings,
                 ): task
-                for task in tasks
+                for task in tasks_to_run
             }
 
             # Process completed tasks
@@ -521,7 +711,7 @@ class BatchTrainer:
                 try:
                     result = future.result()
                     logger.info(
-                        f"[{i}/{len(tasks)}] Completed {task['window_label']}: {result['status']}"
+                        f"[{i}/{len(tasks_to_run)}] Completed {task['window_label']}: {result['status']}"
                     )
 
                     # Log metadata
@@ -530,6 +720,8 @@ class BatchTrainer:
                     # Update stats
                     if result["status"] == "success":
                         self.stats["completed"] += 1
+                    elif result["status"] == "skipped":
+                        self.stats["skipped"] += 1
                     else:
                         self.stats["failed"] += 1
 

@@ -246,13 +246,21 @@ class BreezeClient:
             )
             return []
 
+        # Map NSE exchange code to ISEC stock code
+        # Some symbols use different codes in Breeze API
+        # RELIANCE (NSE) -> RELIND (ISEC), TCS remains TCS
+        stock_code_mapping = {"RELIANCE": "RELIND"}
+        stock_code = stock_code_mapping.get(symbol, symbol)
+
         try:
+            # Use v2 API (more reliable than v1, supports 1-second intervals)
+            # Date format: ISO8601 with timezone (YYYY-MM-DDTHH:MM:SS.000Z)
             response = self._call_with_retry(
-                "get_historical_data",
+                "get_historical_data_v2",
                 interval=interval,
-                from_date=start.strftime("%Y-%m-%d %H:%M:%S"),
-                to_date=end.strftime("%Y-%m-%d %H:%M:%S"),
-                stock_code=symbol,
+                from_date=start.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                to_date=end.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                stock_code=stock_code,
                 exchange_code="NSE",
                 product_type="cash",
             )
@@ -264,6 +272,145 @@ class BreezeClient:
                 extra={"component": "breeze", "symbol": symbol, "interval": interval},
             )
             return []
+
+    def get_historical(
+        self,
+        symbol: str,
+        from_date: datetime,
+        to_date: datetime,
+        interval: Literal["1minute", "5minute", "1day"] = "1day",
+    ) -> pd.DataFrame:
+        """Fetch historical data and return as DataFrame (wrapper for historical_bars).
+
+        This method provides compatibility with scripts/fetch_historical_data.py
+        which expects a DataFrame return format.
+
+        Args:
+            symbol: Stock symbol (e.g., "RELIANCE")
+            from_date: Start datetime
+            to_date: End datetime
+            interval: Bar interval (default: "1day")
+
+        Returns:
+            DataFrame with columns: timestamp, open, high, low, close, volume
+
+        Raises:
+            BreezeTransientError: On network/timeout/server errors
+            BreezeError: On other API errors
+        """
+        import pandas as pd
+
+        bars = self.historical_bars(symbol, interval, from_date, to_date)
+
+        if not bars:
+            return pd.DataFrame()
+
+        # Convert bars to DataFrame
+        data = {
+            "timestamp": [b.ts for b in bars],  # Bar uses 'ts' not 'timestamp'
+            "open": [b.open for b in bars],
+            "high": [b.high for b in bars],
+            "low": [b.low for b in bars],
+            "close": [b.close for b in bars],
+            "volume": [b.volume for b in bars],
+        }
+
+        return pd.DataFrame(data)
+
+    def fetch_historical_chunk(
+        self,
+        symbol: str,
+        start_date: datetime,
+        end_date: datetime,
+        interval: Literal["1minute", "5minute", "1day"] = "1day",
+        max_retries: int = 3,
+    ) -> pd.DataFrame:
+        """Fetch historical data for a date range chunk using v2 API.
+
+        This is the recommended method for fetching historical data in production.
+        It uses get_historical_data_v2 (more reliable than v1), handles stock code
+        mapping (RELIANCE → RELIND), and returns a DataFrame.
+
+        Features:
+        - Uses v2 API with ISO8601 timestamps
+        - Automatic stock code mapping (NSE → ISEC codes)
+        - Retry logic with exponential backoff
+        - Empty DataFrame on no data (not an error)
+
+        Args:
+            symbol: Stock symbol (e.g., "RELIANCE", "TCS")
+            start_date: Chunk start datetime
+            end_date: Chunk end datetime
+            interval: Bar interval ("1minute", "5minute", "1day", etc.)
+            max_retries: Maximum retry attempts on transient errors
+
+        Returns:
+            DataFrame with columns: timestamp, open, high, low, close, volume
+            Empty DataFrame if no data available for the range
+
+        Raises:
+            BreezeTransientError: On network/timeout errors after all retries
+            BreezeError: On non-retryable API errors
+
+        Example:
+            >>> from datetime import datetime
+            >>> client = BreezeClient(..., dry_run=False)
+            >>> client.authenticate()
+            >>> df = client.fetch_historical_chunk(
+            ...     "RELIANCE",
+            ...     datetime(2024, 1, 1),
+            ...     datetime(2024, 3, 31),
+            ...     interval="1day"
+            ... )
+            >>> assert "timestamp" in df.columns
+            >>> assert len(df) > 0  # Should have Q1 2024 data
+        """
+        import pandas as pd
+
+        if self.dry_run:
+            logger.info(
+                "DRYRUN: fetch_historical_chunk",
+                extra={
+                    "component": "breeze",
+                    "symbol": symbol,
+                    "start": start_date.strftime("%Y-%m-%d"),
+                    "end": end_date.strftime("%Y-%m-%d"),
+                    "interval": interval,
+                },
+            )
+            return pd.DataFrame()
+
+        # Use the underlying historical_bars method which already has:
+        # - v2 API
+        # - Stock code mapping
+        # - Retry logic
+        # - Error handling
+        bars = self.historical_bars(symbol, interval, start_date, end_date)
+
+        if not bars:
+            logger.debug(
+                f"No data returned for {symbol} {start_date.date()} to {end_date.date()}",
+                extra={"component": "breeze", "symbol": symbol},
+            )
+            return pd.DataFrame()
+
+        # Convert to DataFrame
+        data = {
+            "timestamp": [b.ts for b in bars],  # Bar uses 'ts' not 'timestamp'
+            "open": [b.open for b in bars],
+            "high": [b.high for b in bars],
+            "low": [b.low for b in bars],
+            "close": [b.close for b in bars],
+            "volume": [b.volume for b in bars],
+        }
+
+        df = pd.DataFrame(data)
+        logger.debug(
+            f"Fetched {len(df)} bars for {symbol} ({start_date.date()} to {end_date.date()})",
+            extra={"component": "breeze", "symbol": symbol, "bars": len(df)},
+        )
+
+        return df
 
     def place_order(
         self,

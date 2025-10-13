@@ -10,7 +10,8 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Load .env from repo root robustly
-load_dotenv(find_dotenv())
+# Use override=True to ensure .env values take precedence over stale shell environment
+load_dotenv(find_dotenv(), override=True)
 
 
 class Settings(BaseSettings):  # type: ignore[misc]
@@ -497,6 +498,17 @@ class Settings(BaseSettings):  # type: ignore[misc]
     historical_data_retry_backoff_seconds: int = Field(
         2, validation_alias="HISTORICAL_DATA_RETRY_BACKOFF_SECONDS", ge=1, le=30
     )  # Base delay for exponential backoff (seconds)
+
+    # US-028: Chunked Historical Data Ingestion with Rate Limiting
+    historical_chunk_days: int = Field(
+        90, validation_alias="HISTORICAL_CHUNK_DAYS", ge=1, le=365
+    )  # Max days per API chunk request (prevents timeout/overload)
+    breeze_rate_limit_requests_per_minute: int = Field(
+        30, validation_alias="BREEZE_RATE_LIMIT_REQUESTS_PER_MINUTE", ge=1, le=100
+    )  # Max Breeze API requests per minute (conservative default)
+    breeze_rate_limit_delay_seconds: float = Field(
+        2.0, validation_alias="BREEZE_RATE_LIMIT_DELAY_SECONDS", ge=0.1, le=10.0
+    )  # Delay between chunk requests to respect rate limits
 
     # =====================================================================
     # US-024: Batch Training Configuration

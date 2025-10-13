@@ -314,3 +314,200 @@ def test_feature_importance_ranking(mock_client_large_data: MagicMock) -> None:
     # Top feature should have highest importance
     assert importance.iloc[0]["rank"] == 1
     assert importance.iloc[0]["importance"] >= importance.iloc[-1]["importance"]
+
+
+def test_batch_trainer_skips_insufficient_future_data() -> None:
+    """Test that BatchTrainer skips windows with insufficient future data."""
+    from datetime import datetime, timedelta
+    from pathlib import Path
+    from unittest.mock import MagicMock
+
+    from src.app.config import Settings
+    from scripts.train_teacher_batch import BatchTrainer
+
+    # Create mock settings
+    settings = MagicMock(spec=Settings)
+    settings.historical_data_output_dir = "data/historical"
+    settings.batch_training_output_dir = "data/models"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_dir = Path(tmpdir)
+
+        # Create batch trainer
+        trainer = BatchTrainer(
+            settings=settings,
+            output_dir=output_dir,
+            resume=False,
+            incremental=False,
+            workers=1,
+        )
+
+        # Create a mock task that requires data beyond what's available
+        # Assume latest available data is 2024-11-30
+        task = {
+            "symbol": "RELIANCE",
+            "start_date": "2024-09-01",
+            "end_date": "2024-12-31",  # Would need data through 2025-03-31 (90 days after)
+            "window_label": "RELIANCE_2024Q4",
+            "artifacts_path": str(output_dir / "RELIANCE_2024Q4"),
+        }
+
+        # Mock get_latest_available_timestamp to return November 30, 2024
+        original_method = trainer.get_latest_available_timestamp
+        trainer.get_latest_available_timestamp = MagicMock(
+            return_value=datetime(2024, 11, 30)
+        )
+
+        # Check if window should be skipped
+        should_skip, reason = trainer.should_skip_window_insufficient_data(
+            task, forecast_horizon=90
+        )
+
+        # Restore original method
+        trainer.get_latest_available_timestamp = original_method
+
+        # Should skip because end_date (2024-12-31) + 90 days = 2025-03-31 > 2024-11-30
+        assert should_skip is True
+        assert "Insufficient future data" in reason
+        assert "2024-11-30" in reason
+
+        # Now test a task that has sufficient data
+        task_sufficient = {
+            "symbol": "RELIANCE",
+            "start_date": "2024-01-01",
+            "end_date": "2024-03-31",  # Would need data through 2024-06-29 (90 days after)
+            "window_label": "RELIANCE_2024Q1",
+            "artifacts_path": str(output_dir / "RELIANCE_2024Q1"),
+        }
+
+        trainer.get_latest_available_timestamp = MagicMock(
+            return_value=datetime(2024, 11, 30)
+        )
+
+        should_skip2, reason2 = trainer.should_skip_window_insufficient_data(
+            task_sufficient, forecast_horizon=90
+        )
+
+        # Should NOT skip because 2024-03-31 + 90 days = 2024-06-29 < 2024-11-30
+        assert should_skip2 is False
+        assert reason2 == ""
+
+
+def test_batch_trainer_deterministic_window_labels() -> None:
+    """Test that window labels are deterministic and include explicit dates (US-028 Phase 6e)."""
+    from pathlib import Path
+    from unittest.mock import MagicMock
+    from src.app.config import Settings
+    from scripts.train_teacher_batch import BatchTrainer
+
+    settings = MagicMock(spec=Settings)
+    settings.batch_training_output_dir = "data/models"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_dir = Path(tmpdir)
+        trainer = BatchTrainer(settings=settings, output_dir=output_dir,
+                              resume=False, incremental=False, workers=1)
+
+        # Generate windows that might overlap calendar quarters
+        tasks = trainer.generate_training_windows(
+            symbols=["RELIANCE"],
+            start_date="2024-01-15",  # Mid-month start
+            end_date="2024-06-15",
+            window_days=90
+        )
+
+        # Verify we have tasks
+        assert len(tasks) > 0
+
+        # Check each label format
+        for task in tasks:
+            label = task["window_label"]
+            start = task["start_date"]
+            end = task["end_date"]
+
+            # Label should follow SYMBOL_YYYY-MM-DD_to_YYYY-MM-DD format
+            assert label == f"RELIANCE_{start}_to_{end}"
+
+            # Label should contain explicit dates
+            assert start in label
+            assert end in label
+            assert "_to_" in label
+
+        # Verify labels are unique
+        labels = [task["window_label"] for task in tasks]
+        assert len(labels) == len(set(labels)), "Window labels are not unique!"
+
+        # Verify labels don't use old quarter format
+        for label in labels:
+            assert "Q1" not in label
+            assert "Q2" not in label
+            assert "Q3" not in label
+            assert "Q4" not in label
+
+
+def test_batch_trainer_error_reporting_with_traceback() -> None:
+    """Test that training errors include full exception details and traceback (US-028 Phase 6e)."""
+    import subprocess
+    from pathlib import Path
+    from unittest.mock import MagicMock, patch
+    from src.app.config import Settings
+    from scripts.train_teacher_batch import BatchTrainer
+
+    settings = MagicMock(spec=Settings)
+    settings.batch_training_output_dir = "data/models"
+    settings.parallel_retry_limit = 1  # No retries for faster test
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_dir = Path(tmpdir)
+        trainer = BatchTrainer(settings=settings, output_dir=output_dir,
+                              resume=False, incremental=False, workers=1)
+
+        task = {
+            "symbol": "TEST",
+            "start_date": "2024-01-01",
+            "end_date": "2024-03-31",
+            "window_label": "TEST_2024-01-01_to_2024-03-31",
+            "artifacts_path": str(output_dir / "TEST_2024-01-01_to_2024-03-31"),
+        }
+
+        # Test Case 1: subprocess failure with stderr
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        mock_result.stderr = "ValueError: Training data has zero samples"
+        mock_result.stdout = "DEBUG: Loading data...\nERROR: No valid samples found"
+
+        with patch("subprocess.run", return_value=mock_result):
+            result = trainer.train_window(task, forecast_horizon=7)
+
+        assert result["status"] == "failed"
+        assert "error" in result
+        assert "ValueError" in result["error"] or "zero samples" in result["error"]
+        assert "error_detail" in result
+        assert result["error_detail"]["exit_code"] == 1
+        assert "stderr" in result["error_detail"]
+
+        # Test Case 2: Exception with traceback
+        def raise_custom_error(*args, **kwargs):
+            raise RuntimeError("Mock training failure for testing")
+
+        with patch("subprocess.run", side_effect=raise_custom_error):
+            result = trainer.train_window(task, forecast_horizon=7)
+
+        assert result["status"] == "failed"
+        assert "error" in result
+        assert "RuntimeError" in result["error"]
+        assert "Mock training failure" in result["error"]
+        assert "error_detail" in result
+        assert "traceback" in result["error_detail"]
+        assert "RuntimeError" in result["error_detail"]["traceback"]
+
+        # Test Case 3: Timeout
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("cmd", 600)):
+            result = trainer.train_window(task, forecast_horizon=7)
+
+        assert result["status"] == "failed"
+        assert "error" in result
+        assert "timeout" in result["error"].lower()
+        assert "error_detail" in result
+        assert "timeout_seconds" in result["error_detail"]
+        assert result["error_detail"]["timeout_seconds"] == 600

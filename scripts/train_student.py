@@ -67,6 +67,9 @@ except ImportError:
         "Matplotlib not available, skipping plot generation", extra={"component": "student"}
     )
 
+# Ensure project root (src) is on sys.path when executed directly
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""

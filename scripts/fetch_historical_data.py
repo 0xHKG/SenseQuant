@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -75,6 +76,8 @@ class HistoricalDataFetcher:
             "downloads": 0,
             "failures": 0,
             "total_rows": 0,
+            "chunks_fetched": 0,
+            "chunks_failed": 0,
         }
 
     def validate_date_range(self, start_date: str, end_date: str) -> tuple[datetime, datetime]:
@@ -121,6 +124,29 @@ class HistoricalDataFetcher:
             dates.append(current_dt.strftime("%Y-%m-%d"))
             current_dt += timedelta(days=1)
         return dates
+
+    def split_date_range_into_chunks(
+        self, start_dt: datetime, end_dt: datetime
+    ) -> list[tuple[datetime, datetime]]:
+        """Split date range into chunks based on settings.historical_chunk_days.
+
+        Args:
+            start_dt: Start datetime
+            end_dt: End datetime
+
+        Returns:
+            List of (chunk_start, chunk_end) tuples
+        """
+        chunk_size = self.settings.historical_chunk_days
+        chunks = []
+
+        current_start = start_dt
+        while current_start <= end_dt:
+            current_end = min(current_start + timedelta(days=chunk_size - 1), end_dt)
+            chunks.append((current_start, current_end))
+            current_start = current_end + timedelta(days=1)
+
+        return chunks
 
     def get_cache_path(self, symbol: str, interval: str, date: str) -> Path:
         """Get cache file path for a symbol/interval/date combination.
@@ -288,11 +314,21 @@ class HistoricalDataFetcher:
         # Create directory
         cache_path.parent.mkdir(parents=True, exist_ok=True)
 
+        # If file exists and is read-only, make it writable temporarily
+        if cache_path.exists():
+            try:
+                cache_path.chmod(0o644)
+            except Exception:
+                pass  # Ignore permission errors
+
         # Save CSV
         df.to_csv(cache_path, index=False)
 
         # Make read-only to prevent accidental edits
-        cache_path.chmod(0o444)
+        try:
+            cache_path.chmod(0o444)
+        except Exception:
+            pass  # Ignore permission errors (e.g., in test environments)
 
         logger.info(f"Saved {len(df)} rows to {cache_path}")
         self.stats["total_rows"] += len(df)
@@ -353,6 +389,189 @@ class HistoricalDataFetcher:
             self.stats["failures"] += 1
             return False
 
+    def fetch_symbol_date_range_chunked(
+        self,
+        symbol: str,
+        start_dt: datetime,
+        end_dt: datetime,
+        interval: str,
+        force: bool = False,
+    ) -> pd.DataFrame:
+        """Fetch data for a symbol/date-range using chunked ingestion.
+
+        This method replaces day-by-day fetching with chunked API calls to improve
+        performance and respect API rate limits. It uses BreezeClient.fetch_historical_chunk()
+        which leverages the v2 API.
+
+        Args:
+            symbol: Stock symbol
+            start_dt: Start datetime
+            end_dt: End datetime
+            interval: Time interval
+            force: If True, ignore cache and re-download all chunks
+
+        Returns:
+            Combined DataFrame with all data from the date range
+
+        Raises:
+            RuntimeError: If any chunk fails to fetch when live data should exist
+        """
+        # Split into chunks
+        chunks = self.split_date_range_into_chunks(start_dt, end_dt)
+
+        logger.info(
+            f"Fetching {symbol} {interval} from {start_dt.date()} to {end_dt.date()} "
+            f"in {len(chunks)} chunk(s) (chunk_size={self.settings.historical_chunk_days} days)"
+        )
+
+        all_data = []
+        failed_chunks = []
+
+        for i, (chunk_start, chunk_end) in enumerate(chunks, 1):
+            # Check if we need to respect rate limits (not first chunk)
+            if i > 1:
+                delay = self.settings.breeze_rate_limit_delay_seconds
+                logger.debug(f"Rate limiting: sleeping {delay}s before next chunk")
+                time.sleep(delay)
+
+            # Check cache for this chunk (simplified: check if any day in chunk is cached)
+            chunk_cached = False
+            if not force:
+                # For simplicity, check if the middle date of the chunk is cached
+                # (A more sophisticated approach would check all dates, but that defeats
+                # the purpose of chunking - we want to reduce API calls)
+                mid_date = chunk_start + (chunk_end - chunk_start) / 2
+                mid_date_str = mid_date.strftime("%Y-%m-%d")
+                if self.is_cached(symbol, interval, mid_date_str):
+                    logger.debug(
+                        f"Chunk {i}/{len(chunks)} partially cached: {chunk_start.date()} to {chunk_end.date()}"
+                    )
+                    chunk_cached = True
+                    self.stats["cached_hits"] += 1
+
+            if chunk_cached and not force:
+                # Load from cache (load all days in chunk)
+                logger.debug(f"Loading chunk {i}/{len(chunks)} from cache")
+                chunk_dates = self.generate_date_list(chunk_start, chunk_end)
+                for date_str in chunk_dates:
+                    cache_path = self.get_cache_path(symbol, interval, date_str)
+                    if cache_path.exists():
+                        try:
+                            df = pd.read_csv(cache_path)
+                            if len(df) > 0:
+                                all_data.append(df)
+                        except Exception as e:
+                            logger.warning(f"Failed to load cache {cache_path}: {e}")
+                continue
+
+            # Fetch chunk from API
+            try:
+                logger.info(
+                    f"Fetching chunk {i}/{len(chunks)}: {symbol} {chunk_start.date()} to {chunk_end.date()}"
+                )
+
+                if self.dryrun:
+                    # Generate mock data for dryrun
+                    mock_dates = pd.date_range(chunk_start, chunk_end, freq="D")
+                    df_chunk = pd.DataFrame(
+                        {
+                            "timestamp": mock_dates,
+                            "open": [2450.0] * len(mock_dates),
+                            "high": [2455.0] * len(mock_dates),
+                            "low": [2448.0] * len(mock_dates),
+                            "close": [2453.0] * len(mock_dates),
+                            "volume": [100000] * len(mock_dates),
+                        }
+                    )
+                else:
+                    # Use BreezeClient's chunked fetch method
+                    if self.breeze_client is None:
+                        raise ValueError(
+                            "BreezeClient not initialized (required for non-dryrun mode)"
+                        )
+
+                    # Convert to timezone-aware timestamps for Breeze API
+                    chunk_start_tz = pd.Timestamp(chunk_start, tz="UTC")
+                    chunk_end_tz = pd.Timestamp(chunk_end, tz="UTC")
+
+                    df_chunk = self.breeze_client.fetch_historical_chunk(
+                        symbol=symbol,
+                        start_date=chunk_start_tz,
+                        end_date=chunk_end_tz,
+                        interval=interval,
+                    )
+
+                if df_chunk is None or len(df_chunk) == 0:
+                    logger.warning(
+                        f"No data returned for chunk {i}/{len(chunks)}: "
+                        f"{symbol} {chunk_start.date()} to {chunk_end.date()}"
+                    )
+                    failed_chunks.append((chunk_start, chunk_end))
+                    self.stats["chunks_failed"] += 1
+                    continue
+
+                # Validate chunk
+                is_valid, error_msg = self.validate_ohlcv_data(
+                    df_chunk, symbol, str(chunk_start.date())
+                )
+                if not is_valid:
+                    logger.error(f"Validation failed for chunk {i}/{len(chunks)}: {error_msg}")
+                    failed_chunks.append((chunk_start, chunk_end))
+                    self.stats["chunks_failed"] += 1
+                    continue
+
+                # Save chunk to cache (split by day for consistency with existing cache structure)
+                df_chunk["timestamp"] = pd.to_datetime(df_chunk["timestamp"])
+                for date_str in df_chunk["timestamp"].dt.strftime("%Y-%m-%d").unique():
+                    df_day = df_chunk[df_chunk["timestamp"].dt.strftime("%Y-%m-%d") == date_str]
+                    self.save_to_cache(df_day, symbol, interval, date_str)
+
+                all_data.append(df_chunk)
+                self.stats["chunks_fetched"] += 1
+                self.stats["downloads"] += 1
+
+                logger.info(
+                    f"✓ Chunk {i}/{len(chunks)} fetched: {len(df_chunk)} rows "
+                    f"({chunk_start.date()} to {chunk_end.date()})"
+                )
+
+            except Exception as e:
+                logger.error(
+                    f"Failed to fetch chunk {i}/{len(chunks)} "
+                    f"({chunk_start.date()} to {chunk_end.date()}): {e}"
+                )
+                failed_chunks.append((chunk_start, chunk_end))
+                self.stats["chunks_failed"] += 1
+                self.stats["failures"] += 1
+
+        # Raise error if any chunks failed (when live data should exist)
+        if failed_chunks and not self.dryrun:
+            error_msg = (
+                f"Failed to fetch {len(failed_chunks)} chunk(s) for {symbol} {interval}: "
+                f"{[(c[0].date(), c[1].date()) for c in failed_chunks]}"
+            )
+            logger.error(error_msg)
+            raise RuntimeError(error_msg)
+
+        # Combine all chunks
+        if not all_data:
+            logger.warning(f"No data fetched for {symbol} {interval} in date range")
+            return pd.DataFrame()
+
+        combined_df = pd.concat(all_data, ignore_index=True)
+
+        # Remove duplicates (in case of overlapping chunks)
+        combined_df = combined_df.drop_duplicates(subset=["timestamp"], keep="first")
+
+        # Sort by timestamp
+        combined_df = combined_df.sort_values("timestamp").reset_index(drop=True)
+
+        logger.info(
+            f"✓ Combined {len(all_data)} chunk(s) into {len(combined_df)} rows for {symbol} {interval}"
+        )
+
+        return combined_df
+
     def fetch_all(
         self,
         symbols: list[str],
@@ -361,7 +580,7 @@ class HistoricalDataFetcher:
         intervals: list[str],
         force: bool = False,
     ) -> dict[str, Any]:
-        """Fetch data for all symbols/dates/intervals.
+        """Fetch data for all symbols/dates/intervals using chunked ingestion.
 
         Args:
             symbols: List of stock symbols
@@ -376,23 +595,38 @@ class HistoricalDataFetcher:
         # Validate date range
         start_dt, end_dt = self.validate_date_range(start_date, end_date)
 
-        # Generate date list
-        dates = self.generate_date_list(start_dt, end_dt)
+        # Calculate number of chunks
+        chunks = self.split_date_range_into_chunks(start_dt, end_dt)
+        num_chunks = len(chunks)
 
         logger.info(
             f"Fetching data for {len(symbols)} symbols, "
-            f"{len(dates)} dates, {len(intervals)} intervals"
+            f"{(end_dt - start_dt).days + 1} days, {len(intervals)} intervals"
         )
-        logger.info(f"Total requests: {len(symbols) * len(dates) * len(intervals)}")
+        logger.info(
+            f"Using chunked ingestion: {num_chunks} chunk(s) per symbol/interval "
+            f"(chunk_size={self.settings.historical_chunk_days} days)"
+        )
+        logger.info(
+            f"Total API requests: ~{len(symbols) * len(intervals) * num_chunks} "
+            f"(vs {len(symbols) * len(intervals) * (end_dt - start_dt).days} without chunking)"
+        )
 
-        # Fetch data
+        # Fetch data using chunked ingestion
         for symbol in symbols:
             for interval in intervals:
-                for date in dates:
-                    success = self.fetch_symbol_date(symbol, date, interval, force=force)
+                try:
+                    df = self.fetch_symbol_date_range_chunked(
+                        symbol, start_dt, end_dt, interval, force=force
+                    )
 
-                    if not success:
-                        logger.warning(f"Failed: {symbol} {date} {interval}")
+                    if df is None or len(df) == 0:
+                        logger.warning(f"No data fetched for {symbol} {interval}")
+                        self.stats["failures"] += 1
+
+                except Exception as e:
+                    logger.error(f"Failed to fetch {symbol} {interval}: {e}")
+                    self.stats["failures"] += 1
 
         # Generate summary
         summary = {
@@ -401,6 +635,8 @@ class HistoricalDataFetcher:
             "downloads": self.stats["downloads"],
             "failures": self.stats["failures"],
             "total_rows": self.stats["total_rows"],
+            "chunks_fetched": self.stats["chunks_fetched"],
+            "chunks_failed": self.stats["chunks_failed"],
             "cache_hit_rate": (
                 self.stats["cached_hits"] / self.stats["total_requests"]
                 if self.stats["total_requests"] > 0
@@ -521,12 +757,40 @@ def main() -> int:
     logger.info(f"Force re-download: {args.force}")
     logger.info("=" * 70)
 
-    # Initialize BreezeClient (only if not dryrun)
+    # Initialize BreezeClient
+    # Determine if we should use dry_run mode
+    use_dry_run = args.dryrun or settings.mode != "live"
+
     breeze_client = None
     if not args.dryrun:
+        # Defensive checks: ensure credentials are present for live mode
+        if not use_dry_run:
+            if (
+                not settings.breeze_api_key
+                or not settings.breeze_api_secret
+                or not settings.breeze_session_token
+            ):
+                logger.error(
+                    "Missing required Breeze API credentials. Required: BREEZE_API_KEY, BREEZE_API_SECRET, BREEZE_SESSION_TOKEN"
+                )
+                raise ValueError(
+                    "Missing required Breeze API credentials. "
+                    "Please set BREEZE_API_KEY, BREEZE_API_SECRET, and BREEZE_SESSION_TOKEN in .env file."
+                )
+
         try:
-            breeze_client = BreezeClient(settings)
-            logger.info("BreezeClient initialized")
+            breeze_client = BreezeClient(
+                api_key=settings.breeze_api_key,
+                api_secret=settings.breeze_api_secret,
+                session_token=settings.breeze_session_token,
+                dry_run=use_dry_run,
+            )
+            logger.info(f"BreezeClient initialized (dry_run={use_dry_run})")
+
+            # Authenticate with Breeze API
+            if not use_dry_run:
+                breeze_client.authenticate()
+                logger.info("Breeze API session established")
         except Exception as e:
             logger.error(f"Failed to initialize BreezeClient: {e}")
             return 1
@@ -548,6 +812,8 @@ def main() -> int:
     logger.info(f"Total requests: {summary['total_requests']}")
     logger.info(f"Cache hits: {summary['cached_hits']} ({summary['cache_hit_rate']:.1%})")
     logger.info(f"New downloads: {summary['downloads']}")
+    logger.info(f"Chunks fetched: {summary['chunks_fetched']}")
+    logger.info(f"Chunks failed: {summary['chunks_failed']}")
     logger.info(f"Failures: {summary['failures']}")
     logger.info(f"Total rows: {summary['total_rows']}")
     logger.info("=" * 70)
