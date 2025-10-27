@@ -33,8 +33,27 @@ from typing import Any
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import streamlit as st
 from loguru import logger
+
+# US-028 Phase 6x: Gracefully handle missing streamlit dependency
+try:
+    import streamlit as st
+    STREAMLIT_AVAILABLE = True
+except ImportError:
+    logger.warning("streamlit not installed - dashboard functionality will be limited")
+    STREAMLIT_AVAILABLE = False
+
+    # Create dummy streamlit object with no-op decorators
+    class DummyStreamlit:
+        """Dummy streamlit replacement when library not installed."""
+        @staticmethod
+        def cache_data(ttl=None):
+            """No-op decorator replacement for st.cache_data."""
+            def decorator(func):
+                return func
+            return decorator
+
+    st = DummyStreamlit()  # type: ignore
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -1010,6 +1029,90 @@ def main() -> None:
         import time
 
         time.sleep(refresh_interval)
+        st.rerun()
+
+
+def load_training_progress() -> dict[str, Any]:
+    """Load training progress from StateManager (US-028 Phase 7 Initiative 4).
+
+    Returns:
+        Training progress dict for all phases
+    """
+    from src.services.state_manager import StateManager
+
+    try:
+        state_mgr = StateManager(Path("data/state/state.json"))
+        return state_mgr.get_training_progress()
+    except Exception as e:
+        logger.warning(f"Failed to load training progress: {e}")
+        return {}
+
+
+def render_training_progress_page() -> None:
+    """Render training progress monitoring page (US-028 Phase 7 Initiative 4).
+
+    This is a standalone page that can be added to the dashboard to monitor
+    long-running training pipelines in real-time.
+    """
+    if not STREAMLIT_AVAILABLE:
+        logger.info("Streamlit not available - training progress monitoring disabled")
+        logger.info("To enable, install streamlit: pip install streamlit")
+        return
+
+    st.title("Training Progress Monitor")
+    st.markdown("Real-time progress tracking for historical training pipelines")
+
+    progress_data = load_training_progress()
+
+    if not progress_data:
+        st.warning("No training progress data available. Start a training run to see progress.")
+        return
+
+    # Display progress for each phase
+    for phase_name, phase_data in progress_data.items():
+        with st.expander(f"📊 {phase_name.replace('_', ' ').title()}", expanded=True):
+            col1, col2, col3, col4 = st.columns(4)
+
+            with col1:
+                st.metric(
+                    "Progress",
+                    f"{phase_data.get('completed', 0)}/{phase_data.get('total', 0)}",
+                )
+
+            with col2:
+                st.metric(
+                    "Percent Complete",
+                    f"{phase_data.get('percent_complete', 0):.1f}%",
+                )
+
+            with col3:
+                eta = phase_data.get("eta_minutes")
+                if eta:
+                    st.metric("ETA", f"{eta:.1f} min")
+                else:
+                    st.metric("ETA", "N/A")
+
+            with col4:
+                st.metric("Status", phase_data.get("status", "unknown").upper())
+
+            # Show additional metadata
+            if "trained" in phase_data:
+                st.write(f"✅ Trained: {phase_data['trained']}")
+            if "skipped" in phase_data:
+                st.write(f"⊘ Skipped: {phase_data['skipped']}")
+            if "failed" in phase_data:
+                st.write(f"✗ Failed: {phase_data['failed']}")
+
+            # Progress bar
+            percent = phase_data.get("percent_complete", 0)
+            st.progress(percent / 100.0)
+
+            # Timestamp
+            timestamp = phase_data.get("timestamp", "N/A")
+            st.caption(f"Last updated: {timestamp}")
+
+    # Auto-refresh button
+    if st.button("🔄 Refresh Progress"):
         st.rerun()
 
 
