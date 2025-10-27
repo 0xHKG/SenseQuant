@@ -1,0 +1,10 @@
+rsi_overbought:
+- 65
+- 70
+- 75
+rsi_oversold:
+- 25
+- 30
+- 35
+rsi_period:
+- 14
