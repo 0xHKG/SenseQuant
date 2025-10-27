@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Literal
 
 import pandas as pd
@@ -106,6 +108,61 @@ def is_transient(e: Exception) -> bool:
     if isinstance(e, (ConnectionError, TimeoutError)):
         return True
     return False
+
+
+# ============================================================================
+# Symbol Mapping
+# ============================================================================
+
+
+def _load_symbol_mappings() -> dict[str, str]:
+    """Load NSE→ISEC symbol mappings from symbol_mappings.json.
+
+    Returns:
+        Dict mapping NSE symbols to ISEC stock codes.
+        Empty dict if file not found or error loading.
+
+    Example:
+        >>> mappings = _load_symbol_mappings()
+        >>> mappings.get("RELIANCE", "RELIANCE")
+        'RELIND'
+        >>> mappings.get("TCS", "TCS")
+        'TCS'
+    """
+    try:
+        # Path relative to project root
+        project_root = Path(__file__).resolve().parent.parent.parent
+        mappings_file = project_root / "data" / "historical" / "metadata" / "symbol_mappings.json"
+
+        if not mappings_file.exists():
+            logger.warning(
+                f"Symbol mappings file not found: {mappings_file}. Using fallback mapping.",
+                extra={"component": "breeze"},
+            )
+            # Fallback to hardcoded RELIANCE mapping
+            return {"RELIANCE": "RELIND"}
+
+        with open(mappings_file) as f:
+            data = json.load(f)
+
+        mappings = data.get("mappings", {})
+        logger.debug(
+            f"Loaded {len(mappings)} symbol mappings from {mappings_file}",
+            extra={"component": "breeze"},
+        )
+        return mappings
+
+    except Exception as e:
+        logger.warning(
+            f"Error loading symbol mappings: {e}. Using fallback mapping.",
+            extra={"component": "breeze"},
+        )
+        # Fallback to hardcoded RELIANCE mapping
+        return {"RELIANCE": "RELIND"}
+
+
+# Module-level symbol mapping cache (loaded once on import)
+SYMBOL_MAPPINGS = _load_symbol_mappings()
 
 
 # ============================================================================
@@ -241,16 +298,58 @@ class BreezeClient:
         """
         if self.dry_run:
             logger.info(
-                "DRYRUN: historical_bars",
+                "DRYRUN: Loading historical_bars from cached data",
                 extra={"component": "breeze", "symbol": symbol, "interval": interval},
             )
-            return []
+            # Load from data/historical/{symbol}/{interval}/*.csv
+            from pathlib import Path
+            import glob
+
+            data_dir = Path("data/historical") / symbol / interval
+            if not data_dir.exists():
+                logger.warning(
+                    f"No cached data found at {data_dir}",
+                    extra={"component": "breeze", "symbol": symbol, "interval": interval},
+                )
+                return []
+
+            # Load all CSV files in the directory
+            csv_files = sorted(glob.glob(str(data_dir / "*.csv")))
+            if not csv_files:
+                logger.warning(
+                    f"No CSV files found in {data_dir}",
+                    extra={"component": "breeze", "symbol": symbol, "interval": interval},
+                )
+                return []
+
+            bars = []
+            for csv_file in csv_files:
+                df = pd.read_csv(csv_file)
+                # Convert to Bar objects
+                for _, row in df.iterrows():
+                    ts = pd.Timestamp(row['timestamp'], tz='Asia/Kolkata')
+                    # Filter by date range
+                    if start <= ts <= end:
+                        bars.append(Bar(
+                            ts=ts,
+                            open=float(row['open']),
+                            high=float(row['high']),
+                            low=float(row['low']),
+                            close=float(row['close']),
+                            volume=int(row['volume']),
+                            symbol=symbol,
+                        ))
+
+            logger.info(
+                f"Loaded {len(bars)} bars from cached data",
+                extra={"component": "breeze", "symbol": symbol, "interval": interval, "bars": len(bars)},
+            )
+            return bars
 
         # Map NSE exchange code to ISEC stock code
-        # Some symbols use different codes in Breeze API
-        # RELIANCE (NSE) -> RELIND (ISEC), TCS remains TCS
-        stock_code_mapping = {"RELIANCE": "RELIND"}
-        stock_code = stock_code_mapping.get(symbol, symbol)
+        # Load mappings from symbol_mappings.json (e.g., RELIANCE→RELIND, INFY→INFTEC)
+        # Symbols not in mapping use their NSE code as-is (e.g., TCS→TCS)
+        stock_code = SYMBOL_MAPPINGS.get(symbol, symbol)
 
         try:
             # Use v2 API (more reliable than v1, supports 1-second intervals)

@@ -42,6 +42,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from loguru import logger
 from sklearn.calibration import calibration_curve  # type: ignore[import-untyped]
@@ -83,7 +84,7 @@ def parse_args() -> argparse.Namespace:
         "--teacher-dir",
         type=str,
         required=True,
-        help="Path to teacher artifacts directory (containing labels.csv.gz, features.csv.gz)",
+        help="Path to teacher artifacts directory (containing labels.csv.gz with embedded features, metadata.json)",
     )
 
     parser.add_argument(
@@ -197,6 +198,34 @@ def parse_args() -> argparse.Namespace:
         help="Minimum Sharpe ratio uplift vs baseline for promotion (e.g., 0.1)",
     )
 
+    # US-028 Phase 7 Initiative 2: Reward loop flags
+    parser.add_argument(
+        "--enable-reward-loop",
+        action="store_true",
+        help="Enable adaptive learning via reward signals (US-028 Phase 7 Initiative 2)",
+    )
+
+    parser.add_argument(
+        "--reward-horizon-days",
+        type=int,
+        default=5,
+        help="Number of days to look ahead for realized returns (reward calculation)",
+    )
+
+    parser.add_argument(
+        "--reward-weighting-mode",
+        type=str,
+        choices=["linear", "exponential", "none"],
+        default="linear",
+        help="Sample weighting mode based on rewards",
+    )
+
+    parser.add_argument(
+        "--reward-ab-testing",
+        action="store_true",
+        help="Enable A/B testing (train both baseline and reward-weighted models)",
+    )
+
     # US-024 Phase 2: Batch mode flags
     parser.add_argument(
         "--batch-mode",
@@ -243,15 +272,16 @@ def load_teacher_artifacts(teacher_dir: Path) -> tuple[pd.DataFrame, pd.DataFram
 
     logger.info(f"Loaded {len(labels_df)} teacher labels", extra={"component": "student"})
 
-    # Load features
-    features_path = teacher_dir / "features.csv.gz"
-    if not features_path.exists():
-        raise FileNotFoundError(f"Teacher features not found: {features_path}")
+    # US-028 Phase 6p: Features are embedded in labels.csv.gz
+    # Extract feature columns (exclude ts, symbol, label, forward_return)
+    exclude_cols = ["ts", "symbol", "label", "forward_return"]
+    feature_cols = [col for col in labels_df.columns if col not in exclude_cols]
+    features_df = labels_df[feature_cols].copy()
 
-    with gzip.open(features_path, "rt") as f:
-        features_df = pd.read_csv(f)
-
-    logger.info(f"Loaded features with shape {features_df.shape}", extra={"component": "student"})
+    logger.info(
+        f"Extracted {len(feature_cols)} features from labels (shape: {features_df.shape})",
+        extra={"component": "student"},
+    )
 
     # Load metadata
     metadata_path = teacher_dir / "metadata.json"
@@ -299,7 +329,8 @@ def prepare_training_data(
     y = data["label"]
 
     # Extract features (drop non-feature columns)
-    non_feature_cols = ["timestamp", "label", "symbol"]
+    # US-028 Phase 6p: Also exclude 'ts', 'forward_return', raw OHLCV
+    non_feature_cols = ["timestamp", "ts", "label", "symbol", "forward_return"]
     X = data.drop(columns=[col for col in non_feature_cols if col in data.columns])
 
     # Drop any NaN rows
@@ -332,6 +363,7 @@ def train_student_model(
     hyperparameter_tuning: bool,
     cv_folds: int,
     seed: int,
+    sample_weights: np.ndarray | None = None,
 ) -> Any:
     """Train student model with optional hyperparameter tuning.
 
@@ -342,12 +374,14 @@ def train_student_model(
         hyperparameter_tuning: Enable hyperparameter tuning
         cv_folds: Number of CV folds
         seed: Random seed
+        sample_weights: Optional sample weights (US-028 Phase 7 Initiative 2)
 
     Returns:
         Trained model
     """
+    weighted_str = "weighted" if sample_weights is not None else "unweighted"
     logger.info(
-        f"Training {model_type} student model (tuning={hyperparameter_tuning})",
+        f"Training {model_type} student model (tuning={hyperparameter_tuning}, {weighted_str})",
         extra={"component": "student"},
     )
 
@@ -399,8 +433,17 @@ def train_student_model(
     else:
         raise ValueError(f"Unknown model type: {model_type}")
 
-    # Train model
-    model.fit(X_train, y_train)
+    # Train model with optional sample weights (US-028 Phase 7 Initiative 2)
+    if sample_weights is not None:
+        logger.info(
+            f"Applying sample weights: mean={sample_weights.mean():.4f}, "
+            f"std={sample_weights.std():.4f}, min={sample_weights.min():.4f}, "
+            f"max={sample_weights.max():.4f}",
+            extra={"component": "student"},
+        )
+        model.fit(X_train, y_train, sample_weight=sample_weights)
+    else:
+        model.fit(X_train, y_train)
 
     if hyperparameter_tuning and isinstance(model, GridSearchCV):
         logger.info(f"Best hyperparameters: {model.best_params_}", extra={"component": "student"})
@@ -905,6 +948,164 @@ def generate_promotion_checklist(
     logger.info(f"Promotion recommendation: {recommendation}", extra={"component": "student"})
 
 
+def calculate_and_log_rewards(
+    labels_df: pd.DataFrame,
+    y_train: pd.Series,
+    output_dir: Path,
+    reward_horizon_days: int,
+    reward_clip_min: float,
+    reward_clip_max: float,
+) -> tuple[list[dict[str, Any]], dict[str, float]]:
+    """Calculate rewards for training samples and log to reward_history.jsonl.
+
+    US-028 Phase 7 Initiative 2: Reward Loop Integration
+
+    Args:
+        labels_df: Full labels dataframe with forward_return column
+        y_train: Training labels (predictions)
+        output_dir: Output directory for reward_history.jsonl
+        reward_horizon_days: Days to look ahead for realized returns
+        reward_clip_min: Minimum reward value (clipping)
+        reward_clip_max: Maximum reward value (clipping)
+
+    Returns:
+        Tuple of (reward_entries, aggregate_metrics)
+    """
+    from src.services.reward_calculator import RewardCalculator
+
+    logger.info(
+        f"Calculating rewards: horizon={reward_horizon_days} days, clip=[{reward_clip_min}, {reward_clip_max}]",
+        extra={"component": "student"},
+    )
+
+    # Initialize reward calculator
+    calculator = RewardCalculator(
+        reward_clip_min=reward_clip_min,
+        reward_clip_max=reward_clip_max,
+    )
+
+    # Build mapping from train indices to forward returns
+    # labels_df should have: ts, symbol, label, forward_return
+    if "forward_return" not in labels_df.columns:
+        logger.warning("No forward_return column in labels_df, cannot calculate rewards", extra={"component": "student"})
+        return [], {}
+
+    # Match train indices with labels_df
+    # y_train.index should align with labels_df indices
+    train_indices = y_train.index.tolist()
+
+    # Extract forward returns for training samples
+    train_forward_returns = labels_df.loc[train_indices, "forward_return"].values
+    train_predictions = y_train.values
+
+    # Check for missing returns
+    missing_returns = np.isnan(train_forward_returns).sum()
+    if missing_returns > 0:
+        logger.warning(
+            f"{missing_returns}/{len(train_forward_returns)} training samples missing forward_return, "
+            "will skip reward calculation for these",
+            extra={"component": "student"},
+        )
+
+    # Calculate rewards for each prediction
+    rewards_data = []
+    for pred, ret in zip(train_predictions, train_forward_returns, strict=False):
+        if np.isnan(ret):
+            # Skip samples with missing returns
+            rewards_data.append({
+                "prediction": int(pred),
+                "actual_return": None,
+                "raw_reward": 0.0,
+                "clipped_reward": 0.0,
+            })
+        else:
+            raw_reward, clipped_reward = calculator.calculate_reward(
+                prediction=int(pred),
+                actual_return=float(ret),
+            )
+            rewards_data.append({
+                "prediction": int(pred),
+                "actual_return": float(ret),
+                "raw_reward": raw_reward,
+                "clipped_reward": clipped_reward,
+            })
+
+    # Log rewards to reward_history.jsonl
+    output_dir.mkdir(parents=True, exist_ok=True)  # Ensure output directory exists
+    reward_history_path = output_dir / "reward_history.jsonl"
+    logger.info(f"Logging {len(rewards_data)} rewards to {reward_history_path}", extra={"component": "student"})
+
+    with open(reward_history_path, "w") as f:
+        for i, reward_entry in enumerate(rewards_data):
+            # Add timestamp and index
+            entry = {
+                "timestamp": datetime.now().isoformat(),
+                "index": int(train_indices[i]) if i < len(train_indices) else i,
+                "prediction": reward_entry["prediction"],
+                "actual_return": reward_entry["actual_return"],
+                "raw_reward": reward_entry["raw_reward"],
+                "clipped_reward": reward_entry["clipped_reward"],
+            }
+            f.write(json.dumps(entry) + "\n")
+
+    # Aggregate metrics - extract clipped rewards from rewards_data
+    clipped_rewards = [r["clipped_reward"] for r in rewards_data]
+    aggregate_metrics = calculator.aggregate_reward_metrics(clipped_rewards)
+
+    # Add num_rewards to aggregate_metrics
+    aggregate_metrics["num_rewards"] = len(rewards_data)
+
+    logger.info(
+        f"Reward metrics: mean={aggregate_metrics['mean_reward']:.4f}, "
+        f"cumulative={aggregate_metrics['cumulative_reward']:.4f}, "
+        f"volatility={aggregate_metrics['reward_volatility']:.4f}, "
+        f"positive={aggregate_metrics['positive_rewards']}/{aggregate_metrics['num_rewards']}",
+        extra={"component": "student"},
+    )
+
+    return rewards_data, aggregate_metrics
+
+
+def compute_reward_based_weights(
+    rewards_data: list[dict[str, Any]],
+    weighting_mode: str,
+    weighting_scale: float,
+) -> np.ndarray:
+    """Compute sample weights from rewards.
+
+    US-028 Phase 7 Initiative 2: Reward Loop Integration
+
+    Args:
+        rewards_data: List of reward entries from calculate_batch_rewards
+        weighting_mode: Weighting mode (linear, exponential, none)
+        weighting_scale: Scaling factor for weights
+
+    Returns:
+        Array of sample weights
+    """
+    from src.services.reward_calculator import RewardCalculator
+
+    calculator = RewardCalculator()
+
+    # Extract clipped rewards
+    rewards = np.array([r["clipped_reward"] for r in rewards_data])
+
+    # Compute weights
+    weights = calculator.compute_sample_weights(
+        rewards=rewards,
+        mode=weighting_mode,
+        scale=weighting_scale,
+    )
+
+    logger.info(
+        f"Computed sample weights: mode={weighting_mode}, scale={weighting_scale}, "
+        f"mean={weights.mean():.4f}, std={weights.std():.4f}",
+        extra={"component": "student"},
+    )
+
+    return weights
+
+
 def main() -> None:
     """Main entry point for Student training."""
     args = parse_args()
@@ -947,14 +1148,88 @@ def main() -> None:
         logger.error(f"Failed to prepare training data: {e}", exc_info=True)
         sys.exit(1)
 
-    # Train student model
-    try:
-        model = train_student_model(
-            X_train, y_train, args.model_type, args.hyperparameter_tuning, args.cv_folds, args.seed
-        )
-    except Exception as e:
-        logger.error(f"Training failed: {e}", exc_info=True)
-        sys.exit(1)
+    # US-028 Phase 7 Initiative 2: Reward Loop Integration
+    output_dir = Path(args.output_dir)
+    reward_metrics_dict = {}
+    baseline_metrics_dict = {}
+
+    if args.enable_reward_loop:
+        logger.info("=" * 80)
+        logger.info("US-028 Phase 7: Reward Loop Enabled")
+        logger.info("=" * 80)
+        logger.info(f"Reward Horizon: {args.reward_horizon_days} days")
+        logger.info(f"Weighting Mode: {args.reward_weighting_mode}")
+        logger.info(f"A/B Testing: {args.reward_ab_testing}")
+        logger.info("=" * 80)
+
+        # Calculate rewards for training samples
+        try:
+            rewards_data, reward_metrics_dict = calculate_and_log_rewards(
+                labels_df=labels_df,
+                y_train=y_train,
+                output_dir=output_dir,
+                reward_horizon_days=args.reward_horizon_days,
+                reward_clip_min=-2.0,  # From Settings defaults
+                reward_clip_max=2.0,
+            )
+        except Exception as e:
+            logger.error(f"Reward calculation failed: {e}", exc_info=True)
+            sys.exit(1)
+
+        # Compute sample weights from rewards
+        try:
+            sample_weights = compute_reward_based_weights(
+                rewards_data=rewards_data,
+                weighting_mode=args.reward_weighting_mode,
+                weighting_scale=1.0,  # From Settings defaults
+            )
+        except Exception as e:
+            logger.error(f"Weight computation failed: {e}", exc_info=True)
+            sys.exit(1)
+
+        # A/B Testing: Train baseline model first
+        if args.reward_ab_testing:
+            logger.info("=" * 80)
+            logger.info("A/B Testing: Training Baseline Model (uniform weights)")
+            logger.info("=" * 80)
+            try:
+                baseline_model = train_student_model(
+                    X_train, y_train, args.model_type, args.hyperparameter_tuning, args.cv_folds, args.seed,
+                    sample_weights=None,  # Uniform weights
+                )
+                baseline_metrics_dict = evaluate_model(baseline_model, X_test, y_test)
+                logger.info("-" * 80)
+                logger.info("Baseline Model Performance:")
+                logger.info(f"  Precision: {baseline_metrics_dict['precision_macro']:.4f}")
+                logger.info(f"  Recall:    {baseline_metrics_dict['recall_macro']:.4f}")
+                logger.info(f"  F1 Score:  {baseline_metrics_dict['f1_macro']:.4f}")
+                logger.info("=" * 80)
+            except Exception as e:
+                logger.warning(f"Baseline model training failed: {e}")
+                baseline_metrics_dict = {}
+
+        # Train reward-weighted model
+        logger.info("=" * 80)
+        logger.info(f"Training Reward-Weighted Model ({args.reward_weighting_mode} weighting)")
+        logger.info("=" * 80)
+        try:
+            model = train_student_model(
+                X_train, y_train, args.model_type, args.hyperparameter_tuning, args.cv_folds, args.seed,
+                sample_weights=sample_weights,
+            )
+        except Exception as e:
+            logger.error(f"Reward-weighted training failed: {e}", exc_info=True)
+            sys.exit(1)
+
+    else:
+        # Standard training without reward loop
+        try:
+            model = train_student_model(
+                X_train, y_train, args.model_type, args.hyperparameter_tuning, args.cv_folds, args.seed
+            )
+        except Exception as e:
+            logger.error(f"Training failed: {e}", exc_info=True)
+            sys.exit(1)
 
     # Evaluate model
     try:
@@ -1001,6 +1276,39 @@ def main() -> None:
     logger.info(f"  F1 Score:    {metrics['f1_macro']:.4f}")
     logger.info(f"  AUC-ROC:     {metrics['auc_macro']:.4f}")
     logger.info("=" * 80)
+
+    # US-028 Phase 7 Initiative 2: Print reward metrics and A/B comparison
+    if args.enable_reward_loop and reward_metrics_dict:
+        logger.info("=" * 80)
+        logger.info("Reward Loop Metrics")
+        logger.info("=" * 80)
+        logger.info(f"Mean Reward:        {reward_metrics_dict.get('mean_reward', 0.0):.4f}")
+        logger.info(f"Cumulative Reward:  {reward_metrics_dict.get('cumulative_reward', 0.0):.4f}")
+        logger.info(f"Reward Volatility:  {reward_metrics_dict.get('reward_volatility', 0.0):.4f}")
+        logger.info(f"Positive Rewards:   {reward_metrics_dict.get('positive_rewards', 0)}/{reward_metrics_dict.get('num_rewards', 0)}")
+        logger.info(f"Reward History:     {output_dir / 'reward_history.jsonl'}")
+        logger.info("=" * 80)
+
+        # Print JSON for batch script parsing
+        print(f"REWARD_METRICS_JSON: {json.dumps(reward_metrics_dict)}")
+
+        if args.reward_ab_testing and baseline_metrics_dict:
+            logger.info("=" * 80)
+            logger.info("A/B Testing: Baseline vs Reward-Weighted")
+            logger.info("=" * 80)
+            logger.info("                Baseline  Reward-Weighted  Delta")
+            logger.info("-" * 80)
+
+            for metric_name in ["precision_macro", "recall_macro", "f1_macro"]:
+                baseline_val = baseline_metrics_dict.get(metric_name, 0.0)
+                reward_val = metrics.get(metric_name, 0.0)
+                delta = reward_val - baseline_val
+                delta_str = f"{delta:+.4f}"
+                logger.info(f"{metric_name:20s} {baseline_val:.4f}    {reward_val:.4f}           {delta_str}")
+
+            logger.info("=" * 80)
+            logger.info(f"Reward weighting improved F1 by: {(metrics.get('f1_macro', 0.0) - baseline_metrics_dict.get('f1_macro', 0.0)):+.4f}")
+            logger.info("=" * 80)
 
     # US-021 Phase 2: Validation and promotion checklist
     validation_metrics = {}

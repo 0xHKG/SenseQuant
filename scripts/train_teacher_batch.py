@@ -36,6 +36,7 @@ from typing import Any
 
 import pandas as pd  # type: ignore[import-untyped]
 from loguru import logger
+from tqdm import tqdm
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -167,8 +168,13 @@ class BatchTrainer:
             True if artifacts exist for this window
         """
         artifacts_path = Path(task["artifacts_path"])
-        # Check for common teacher artifacts
-        return (artifacts_path / "labels.csv").exists()
+        # US-028 Phase 6o: Check for new standardized artifact filenames
+        required_files = [
+            artifacts_path / "model.pkl",
+            artifacts_path / "labels.csv.gz",
+            artifacts_path / "metadata.json",
+        ]
+        return all(f.exists() for f in required_files)
 
     def get_latest_available_timestamp(self, symbol: str) -> datetime | None:
         """Get the latest available timestamp for a symbol from cached data.
@@ -264,9 +270,14 @@ class BatchTrainer:
         end_date = task["end_date"]
         window_label = task["window_label"]
 
-        logger.info(f"Training {window_label}: {start_date} to {end_date}")
+        # US-028 Phase 6o: Create artifacts subdirectory
+        artifacts_path = Path(task["artifacts_path"])
+        artifacts_path.mkdir(parents=True, exist_ok=True)
 
-        # Build command to invoke train_teacher.py
+        logger.info(f"Training {window_label}: {start_date} to {end_date}")
+        logger.info(f"  Artifacts directory: {artifacts_path}")
+
+        # US-028 Phase 6o: Build command with --output-dir
         cmd = [
             sys.executable,
             "scripts/train_teacher.py",
@@ -278,6 +289,8 @@ class BatchTrainer:
             end_date,
             "--window",
             str(forecast_horizon),
+            "--output-dir",
+            str(artifacts_path),
         ]
 
         try:
@@ -290,10 +303,54 @@ class BatchTrainer:
             )
 
             if result.returncode == 0:
+                # Extract sample diagnostics (US-028 Phase 6f)
+                sample_counts = self._extract_sample_diagnostics(result.stdout)
+
+                # Check for zero-sample case (US-028 Phase 6f)
+                if sample_counts and sample_counts.get("total_samples", 0) == 0:
+                    skip_reason = (
+                        f"Insufficient samples: 0 total samples after filtering "
+                        f"(train={sample_counts.get('train_samples', 0)}, "
+                        f"val={sample_counts.get('val_samples', 0)})"
+                    )
+                    logger.warning(
+                        f"⊘ {window_label} skipped: {skip_reason}",
+                        extra={
+                            "component": "batch_trainer",
+                            "status": "skipped",
+                            "reason": "insufficient_samples",
+                        },
+                    )
+                    return {
+                        "status": "skipped",
+                        "reason": skip_reason,
+                        "sample_counts": sample_counts,
+                        "metrics": None,
+                    }
+
                 logger.info(f"✓ {window_label} completed successfully")
                 return {
                     "status": "success",
                     "metrics": self._extract_metrics_from_output(result.stdout),
+                    "sample_counts": sample_counts,  # Include diagnostics in success case
+                }
+            elif result.returncode == 2:
+                # US-028 Phase 6h: Exit code 2 indicates skip condition (insufficient samples)
+                skip_info = self._extract_skip_info(result.stdout)
+                skip_reason = skip_info.get("reason", "Unknown skip reason")
+                logger.warning(
+                    f"⊘ {window_label} skipped: {skip_reason}",
+                    extra={
+                        "component": "batch_trainer",
+                        "status": "skipped",
+                        "reason": "insufficient_samples",
+                    },
+                )
+                return {
+                    "status": "skipped",
+                    "reason": skip_reason,
+                    "sample_counts": None,
+                    "metrics": None,
                 }
             else:
                 # Capture full error details from subprocess
@@ -395,6 +452,52 @@ class BatchTrainer:
         # Return metrics if we found any, otherwise None
         return metrics if metrics else None
 
+    def _extract_skip_info(self, stdout: str) -> dict[str, Any]:
+        """Extract skip information from training output (US-028 Phase 6h).
+
+        Args:
+            stdout: Training script stdout
+
+        Returns:
+            Dict with skip reason, or empty dict if not found
+        """
+        import json
+
+        for line in stdout.split("\n"):
+            if "TEACHER_SKIP:" in line:
+                try:
+                    json_str = line.split("TEACHER_SKIP:", 1)[1].strip()
+                    skip_info = json.loads(json_str)
+                    return skip_info  # type: ignore[no-any-return]
+                except (ValueError, IndexError, json.JSONDecodeError) as e:
+                    logger.warning(f"Failed to parse teacher skip info: {e}")
+        return {}
+
+    def _extract_sample_diagnostics(self, stdout: str) -> dict[str, Any] | None:
+        """Extract sample count diagnostics from training output (US-028 Phase 6f).
+
+        Args:
+            stdout: Training script stdout
+
+        Returns:
+            Dict with sample counts or None if not found
+        """
+        import json
+
+        # Look for TEACHER_DIAGNOSTICS line in stdout
+        for line in stdout.split("\n"):
+            if "TEACHER_DIAGNOSTICS:" in line:
+                try:
+                    # Extract JSON after the prefix
+                    json_str = line.split("TEACHER_DIAGNOSTICS:", 1)[1].strip()
+                    diagnostics = json.loads(json_str)
+                    return diagnostics.get("sample_counts")  # type: ignore[no-any-return]
+                except (ValueError, IndexError, json.JSONDecodeError) as e:
+                    logger.warning(f"Failed to parse teacher diagnostics: {e}")
+                    pass
+
+        return None
+
     def train_window_with_retry(
         self,
         task: dict[str, Any],
@@ -479,8 +582,16 @@ class BatchTrainer:
             "attempts": result.get("attempts", 1),  # US-024 Phase 5
         }
 
+        # US-028 Phase 6f: Include sample diagnostics if available
+        if "sample_counts" in result and result["sample_counts"]:
+            metadata["sample_counts"] = result["sample_counts"]
+
         if result["status"] == "failed":
             metadata["error"] = result.get("error")
+
+        # US-028 Phase 6f: Include skip reason for skipped windows
+        if result["status"] == "skipped":
+            metadata["skip_reason"] = result.get("reason", "Unknown")
 
         # US-024 Phase 3: Check for sentiment snapshots
         sentiment_dir = Path(self.settings.sentiment_snapshot_output_dir) / task["symbol"]
@@ -606,49 +717,70 @@ class BatchTrainer:
             tasks: List of training tasks
             forecast_horizon: Forecast horizon in days
         """
-        for i, task in enumerate(tasks, 1):
-            logger.info(f"[{i}/{len(tasks)}] Processing {task['window_label']}")
+        # US-028 Phase 7 Initiative 4: Progress monitoring with tqdm
+        with tqdm(total=len(tasks), desc="Training teacher models", unit="window") as pbar:
+            for i, task in enumerate(tasks, 1):
+                logger.info(f"[{i}/{len(tasks)}] Processing {task['window_label']}")
 
-            # Check if window should be skipped due to insufficient future data
-            should_skip, skip_reason = self.should_skip_window_insufficient_data(
-                task, forecast_horizon
-            )
-
-            if should_skip:
-                logger.warning(
-                    f"⊘ {task['window_label']} skipped: {skip_reason}",
-                    extra={
-                        "component": "batch_trainer",
-                        "status": "skipped",
-                        "reason": "insufficient_future_data",
-                    },
+                # Check if window should be skipped due to insufficient future data
+                should_skip, skip_reason = self.should_skip_window_insufficient_data(
+                    task, forecast_horizon
                 )
 
-                # Log skip metadata
-                skip_result = {
-                    "status": "skipped",
-                    "reason": skip_reason,
-                    "metrics": None,
-                }
-                self.log_metadata(task, skip_result)
+                if should_skip:
+                    logger.warning(
+                        f"⊘ {task['window_label']} skipped: {skip_reason}",
+                        extra={
+                            "component": "batch_trainer",
+                            "status": "skipped",
+                            "reason": "insufficient_future_data",
+                        },
+                    )
+
+                    # Log skip metadata
+                    skip_result = {
+                        "status": "skipped",
+                        "reason": skip_reason,
+                        "metrics": None,
+                    }
+                    self.log_metadata(task, skip_result)
+
+                    # Update stats
+                    self.stats["skipped"] += 1
+                    # US-028 Phase 7 Initiative 4: Update progress bar
+                    pbar.update(1)
+                    pbar.set_postfix({
+                        "window": task["window_label"][:20],
+                        "status": "skipped",
+                        "trained": self.stats["completed"],
+                        "skipped": self.stats["skipped"],
+                        "failed": self.stats["failed"],
+                    })
+                    continue
+
+                # Train window with retry
+                result = self.train_window_with_retry(task, forecast_horizon)
+
+                # Log metadata
+                self.log_metadata(task, result)
 
                 # Update stats
-                self.stats["skipped"] += 1
-                continue
+                if result["status"] == "success":
+                    self.stats["completed"] += 1
+                elif result["status"] == "skipped":
+                    self.stats["skipped"] += 1
+                else:
+                    self.stats["failed"] += 1
 
-            # Train window with retry
-            result = self.train_window_with_retry(task, forecast_horizon)
-
-            # Log metadata
-            self.log_metadata(task, result)
-
-            # Update stats
-            if result["status"] == "success":
-                self.stats["completed"] += 1
-            elif result["status"] == "skipped":
-                self.stats["skipped"] += 1
-            else:
-                self.stats["failed"] += 1
+                # US-028 Phase 7 Initiative 4: Update progress bar
+                pbar.update(1)
+                pbar.set_postfix({
+                    "window": task["window_label"][:20],
+                    "status": result["status"],
+                    "trained": self.stats["completed"],
+                    "skipped": self.stats["skipped"],
+                    "failed": self.stats["failed"],
+                })
 
     def _run_parallel(
         self,
@@ -693,6 +825,7 @@ class BatchTrainer:
             logger.warning("No tasks to run after skipping windows with insufficient data")
             return
 
+        # US-028 Phase 7 Initiative 4: Progress monitoring for parallel execution
         with ProcessPoolExecutor(max_workers=self.workers) as executor:
             # Submit filtered tasks
             future_to_task = {
@@ -705,36 +838,57 @@ class BatchTrainer:
                 for task in tasks_to_run
             }
 
-            # Process completed tasks
-            for i, future in enumerate(as_completed(future_to_task), 1):
-                task = future_to_task[future]
-                try:
-                    result = future.result()
-                    logger.info(
-                        f"[{i}/{len(tasks_to_run)}] Completed {task['window_label']}: {result['status']}"
-                    )
+            # Process completed tasks with progress bar
+            with tqdm(total=len(tasks_to_run), desc="Training teacher models (parallel)", unit="window") as pbar:
+                for i, future in enumerate(as_completed(future_to_task), 1):
+                    task = future_to_task[future]
+                    try:
+                        result = future.result()
+                        logger.info(
+                            f"[{i}/{len(tasks_to_run)}] Completed {task['window_label']}: {result['status']}"
+                        )
 
-                    # Log metadata
-                    self.log_metadata(task, result)
+                        # Log metadata
+                        self.log_metadata(task, result)
 
-                    # Update stats
-                    if result["status"] == "success":
-                        self.stats["completed"] += 1
-                    elif result["status"] == "skipped":
-                        self.stats["skipped"] += 1
-                    else:
+                        # Update stats
+                        if result["status"] == "success":
+                            self.stats["completed"] += 1
+                        elif result["status"] == "skipped":
+                            self.stats["skipped"] += 1
+                        else:
+                            self.stats["failed"] += 1
+
+                        # US-028 Phase 7 Initiative 4: Update progress bar
+                        pbar.update(1)
+                        pbar.set_postfix({
+                            "window": task["window_label"][:20],
+                            "status": result["status"],
+                            "trained": self.stats["completed"],
+                            "skipped": self.stats["skipped"],
+                            "failed": self.stats["failed"],
+                        })
+
+                    except Exception as e:
+                        logger.error(f"Worker exception for {task['window_label']}: {e}")
+                        result = {
+                            "status": "failed",
+                            "error": f"Worker exception: {str(e)}",
+                            "metrics": None,
+                            "attempts": 1,
+                        }
+                        self.log_metadata(task, result)
                         self.stats["failed"] += 1
 
-                except Exception as e:
-                    logger.error(f"Worker exception for {task['window_label']}: {e}")
-                    result = {
-                        "status": "failed",
-                        "error": f"Worker exception: {str(e)}",
-                        "metrics": None,
-                        "attempts": 1,
-                    }
-                    self.log_metadata(task, result)
-                    self.stats["failed"] += 1
+                        # US-028 Phase 7 Initiative 4: Update progress bar
+                        pbar.update(1)
+                        pbar.set_postfix({
+                            "window": task["window_label"][:20],
+                            "status": "failed",
+                            "trained": self.stats["completed"],
+                            "skipped": self.stats["skipped"],
+                            "failed": self.stats["failed"],
+                        })
 
     @staticmethod
     def _train_window_worker(

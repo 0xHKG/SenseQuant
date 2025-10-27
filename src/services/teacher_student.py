@@ -67,16 +67,23 @@ class TeacherLabeler:
     5. Export artifacts (model, labels, importance, metadata)
     """
 
-    def __init__(self, config: TrainingConfig, client: BreezeClient | None = None) -> None:
+    def __init__(
+        self,
+        config: TrainingConfig,
+        client: BreezeClient | None = None,
+        output_dir: Path | None = None,
+    ) -> None:
         """Initialize Teacher with training configuration.
 
         Args:
             config: Training configuration (symbol, dates, labeling params)
             client: Optional BreezeClient for data loading (None for testing)
+            output_dir: Output directory for artifacts (US-028 Phase 6o)
         """
         self.config = config
         self.client = client
         self.model: Any = None  # LightGBM or sklearn model
+        self.output_dir = output_dir or Path("data/models")  # US-028 Phase 6o
 
         logger.info(
             f"Initialized TeacherLabeler for {config.symbol}",
@@ -280,6 +287,9 @@ class TeacherLabeler:
 
         Returns:
             Dictionary with trained model, metrics, and feature importance
+
+        Raises:
+            ValueError: If insufficient samples for training (US-028 Phase 6h)
         """
         # Define feature columns (exclude metadata and target)
         exclude_cols = [
@@ -298,13 +308,38 @@ class TeacherLabeler:
         X = df[feature_cols]  # noqa: N806
         y = labels
 
+        # US-028 Phase 6h: Check minimum sample threshold
+        min_samples = 20  # Configurable minimum for training
+        if len(X) < min_samples:
+            raise ValueError(
+                f"Insufficient samples for training: {len(X)} < {min_samples} minimum. "
+                f"Consider increasing window size or reducing forecast horizon."
+            )
+
+        # US-028 Phase 6h: Dynamic train/val split for small datasets
+        # For datasets < 40 samples, use smaller train split to ensure validation has >= 2 samples
+        if len(X) < 40:
+            # Ensure validation gets at least 2 samples minimum
+            train_split = max(0.6, 1.0 - 2.0 / len(X))
+            logger.warning(
+                f"Small dataset detected ({len(X)} samples). Using reduced train_split={train_split:.2f} "
+                f"to ensure sufficient validation samples.",
+                extra={
+                    "component": "teacher",
+                    "total_samples": len(X),
+                    "adjusted_train_split": train_split,
+                },
+            )
+        else:
+            train_split = self.config.train_split
+
         logger.info(
             "Preparing train/validation split",
             extra={
                 "component": "teacher",
                 "total_samples": len(X),
                 "features": len(feature_cols),
-                "train_split": self.config.train_split,
+                "train_split": train_split,
             },
         )
 
@@ -317,7 +352,7 @@ class TeacherLabeler:
             X_train, X_val, y_train, y_val = train_test_split(  # noqa: N806
                 X,
                 y,
-                train_size=self.config.train_split,
+                train_size=train_split,
                 random_state=self.config.random_seed,
                 stratify=y,
             )
@@ -329,7 +364,7 @@ class TeacherLabeler:
             X_train, X_val, y_train, y_val = train_test_split(  # noqa: N806
                 X,
                 y,
-                train_size=self.config.train_split,
+                train_size=train_split,
                 random_state=self.config.random_seed,
                 stratify=None,
             )
@@ -347,13 +382,21 @@ class TeacherLabeler:
         model_params = self.config.model_params or {}
 
         if LIGHTGBM_AVAILABLE:
-            # Use LightGBM
+            # Use LightGBM with CUDA and optimized params for maximum accuracy
+            # 2x NVIDIA RTX A6000 GPUs - MANDATORY CUDA USAGE
             default_params = {
                 "objective": "binary",
-                "num_leaves": 31,
-                "max_depth": 5,
-                "learning_rate": 0.05,
-                "n_estimators": 100,
+                "device": "cuda",  # MANDATORY GPU (2x A6000)
+                "gpu_platform_id": 0,
+                "gpu_device_id": 0,
+                "num_leaves": 127,  # High complexity for pattern recognition
+                "max_depth": 9,  # Deep trees for non-linear patterns
+                "learning_rate": 0.01,  # Slow learning for precision
+                "n_estimators": 500,  # Many boosting rounds with early stopping
+                "min_child_samples": 20,  # Regularization
+                "subsample": 0.8,  # Row sampling / bagging
+                "colsample_bytree": 0.8,  # Feature sampling
+                "is_unbalance": True,  # Handle class imbalance
                 "random_state": self.config.random_seed,
                 "verbose": -1,
             }
@@ -382,8 +425,17 @@ class TeacherLabeler:
 
             model = GradientBoostingClassifier(**params)
 
-        # Train model
-        model.fit(X_train, y_train)
+        # Train model with early stopping
+        if LIGHTGBM_AVAILABLE:
+            model.fit(
+                X_train,
+                y_train,
+                eval_set=[(X_val, y_val)],
+                eval_metric="binary_logloss",
+                callbacks=[lgb.early_stopping(stopping_rounds=50, verbose=False)],
+            )
+        else:
+            model.fit(X_train, y_train)
 
         # Predictions
         y_train_pred = model.predict(X_train)
@@ -452,15 +504,15 @@ class TeacherLabeler:
         Returns:
             TrainingResult with paths to all saved artifacts
         """
-        # Create timestamp-based filenames
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        models_dir = Path("data/models")
-        models_dir.mkdir(parents=True, exist_ok=True)
+        # US-028 Phase 6o: Use output_dir with standardized filenames
+        # Create output directory if it doesn't exist
+        self.output_dir.mkdir(parents=True, exist_ok=True)
 
-        model_path = models_dir / f"teacher_model_{timestamp}.pkl"
-        labels_path = models_dir / f"teacher_labels_{timestamp}.csv"
-        importance_path = models_dir / f"teacher_importance_{timestamp}.csv"
-        metadata_path = models_dir / f"teacher_metadata_{timestamp}.json"
+        # Use standardized filenames (not timestamp-based) for batch training
+        model_path = self.output_dir / "model.pkl"
+        labels_path = self.output_dir / "labels.csv.gz"
+        importance_path = self.output_dir / "feature_importance.csv"
+        metadata_path = self.output_dir / "metadata.json"
 
         logger.info(
             "Saving artifacts",
@@ -490,7 +542,8 @@ class TeacherLabeler:
             + ["label", "forward_return"]
         )
         labels_df = labels_df[[c for c in col_order if c in labels_df.columns]]
-        labels_df.to_csv(labels_path, index=False)
+        # US-028 Phase 6o: Save as compressed CSV
+        labels_df.to_csv(labels_path, index=False, compression="gzip")
 
         # Save feature importance CSV
         importance.to_csv(importance_path, index=False)
@@ -1122,8 +1175,9 @@ class StudentModel:
         error: str | None = None,
         sentiment_snapshot_path: str | None = None,
         incremental: bool = False,
+        reward_metrics: dict[str, float] | None = None,
     ) -> None:
-        """Log student batch training metadata to JSON Lines file (US-024 Phases 2-4).
+        """Log student batch training metadata to JSON Lines file (US-024 Phases 2-4, US-028 Phase 7 Initiative 2).
 
         Args:
             metadata_file: Path to JSON Lines metadata file
@@ -1138,6 +1192,7 @@ class StudentModel:
             error: Error message if status is 'failed'
             sentiment_snapshot_path: Path to sentiment snapshot directory (Phase 3)
             incremental: Whether this is an incremental run (Phase 4)
+            reward_metrics: Reward signal metrics (Phase 7 Initiative 2)
         """
         import json
         from datetime import datetime
@@ -1164,6 +1219,13 @@ class StudentModel:
             metadata["sentiment_available"] = True
         else:
             metadata["sentiment_available"] = False
+
+        # US-028 Phase 7 Initiative 2: Add reward metrics
+        if reward_metrics is not None:
+            metadata["reward_metrics"] = reward_metrics
+            metadata["reward_loop_enabled"] = True
+        else:
+            metadata["reward_loop_enabled"] = False
 
         # Append to JSON Lines file
         with open(metadata_file, "a") as f:

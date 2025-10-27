@@ -39,6 +39,7 @@ from typing import Any
 import pandas as pd
 import tenacity
 from loguru import logger
+from tqdm import tqdm
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -78,7 +79,15 @@ class HistoricalDataFetcher:
             "total_rows": 0,
             "chunks_fetched": 0,
             "chunks_failed": 0,
+            "warnings": 0,  # US-028 Phase 6j: Track data quality warnings
+            "duplicates_removed": 0,  # US-028 Phase 7 Initiative 1: Deduplication tracking
+            "gaps_detected": 0,  # US-028 Phase 7 Initiative 1: Gap detection tracking
         }
+
+        # US-028 Phase 7 Initiative 1: Rate limiting tracking
+        self.request_times: list[float] = []  # Track request timestamps for rate limiting
+        self.fetch_log_path = Path("data/historical/metadata/fetch_log.jsonl")
+        self.fetch_log_path.parent.mkdir(parents=True, exist_ok=True)
 
     def validate_date_range(self, start_date: str, end_date: str) -> tuple[datetime, datetime]:
         """Validate and parse date range.
@@ -124,6 +133,161 @@ class HistoricalDataFetcher:
             dates.append(current_dt.strftime("%Y-%m-%d"))
             current_dt += timedelta(days=1)
         return dates
+
+    def detect_gaps(
+        self,
+        df: pd.DataFrame,
+        symbol: str,
+        start_dt: datetime,
+        end_dt: datetime,
+    ) -> list[tuple[str, str]]:
+        """Detect gaps in fetched data (US-028 Phase 7 Initiative 1).
+
+        Compares expected trading days against actual data to identify missing dates.
+
+        Args:
+            df: DataFrame with fetched data
+            symbol: Stock symbol
+            start_dt: Expected start date
+            end_dt: Expected end date
+
+        Returns:
+            List of gap tuples (start_date, end_date) as ISO format strings
+        """
+        if df is None or len(df) == 0:
+            logger.warning(f"No data to check for gaps: {symbol}")
+            return []
+
+        # Generate expected trading days (all days, assuming no filtering)
+        # In production, this would use a trading calendar (NSE holidays, etc.)
+        expected_dates = pd.date_range(start_dt, end_dt, freq="D")
+
+        # Get actual dates from data
+        if "timestamp" in df.columns:
+            actual_dates = pd.to_datetime(df["timestamp"]).dt.date
+        elif "datetime" in df.columns:
+            actual_dates = pd.to_datetime(df["datetime"]).dt.date
+        else:
+            logger.warning(f"No timestamp column found in data for {symbol}")
+            return []
+
+        actual_dates_set = set(actual_dates.unique())
+        expected_dates_set = set(expected_dates.date)
+
+        # Find missing dates
+        missing_dates = sorted(expected_dates_set - actual_dates_set)
+
+        if not missing_dates:
+            return []
+
+        # Group consecutive missing dates into gap ranges
+        gaps = []
+        gap_start = missing_dates[0]
+        gap_end = missing_dates[0]
+
+        for i in range(1, len(missing_dates)):
+            current = missing_dates[i]
+            prev = missing_dates[i - 1]
+
+            # Check if consecutive (allowing for 1-day gap which might be weekend)
+            if (current - prev).days <= 3:
+                gap_end = current
+            else:
+                # Save current gap and start new one
+                gaps.append((gap_start.isoformat(), gap_end.isoformat()))
+                gap_start = current
+                gap_end = current
+
+        # Add final gap
+        gaps.append((gap_start.isoformat(), gap_end.isoformat()))
+
+        if gaps:
+            logger.warning(
+                f"Detected {len(gaps)} gap(s) in {symbol} data: {gaps}",
+                extra={"component": "gap_detection", "gaps": len(gaps)},
+            )
+            self.stats["gaps_detected"] += len(gaps)
+
+        return gaps
+
+    def enforce_rate_limit(self) -> None:
+        """Enforce rate limiting based on requests per minute (US-028 Phase 7 Initiative 1).
+
+        Tracks request timestamps and sleeps if rate limit would be exceeded.
+        """
+        import time
+
+        now = time.time()
+        rate_limit = self.settings.breeze_rate_limit_requests_per_minute
+        window_seconds = 60.0
+
+        # Remove timestamps older than 1 minute
+        self.request_times = [t for t in self.request_times if (now - t) < window_seconds]
+
+        # Check if we've hit the rate limit
+        if len(self.request_times) >= rate_limit:
+            # Calculate how long to sleep
+            oldest_request = self.request_times[0]
+            sleep_time = window_seconds - (now - oldest_request) + 0.1  # Add small buffer
+            if sleep_time > 0:
+                logger.info(
+                    f"  ⏱ Rate limit reached ({len(self.request_times)}/{rate_limit} req/min), "
+                    f"sleeping {sleep_time:.1f}s",
+                    extra={"component": "rate_limiter", "throttled": True},
+                )
+                time.sleep(sleep_time)
+
+        # Record this request
+        self.request_times.append(time.time())
+
+    def log_fetch_entry(
+        self,
+        symbol: str,
+        interval: str,
+        chunk_start: str,
+        chunk_end: str,
+        rows_fetched: int,
+        source: str,
+        status: str,
+        retries: int = 0,
+        warnings: int = 0,
+        error: str | None = None,
+    ) -> None:
+        """Append fetch entry to fetch_log.jsonl (US-028 Phase 7 Initiative 1).
+
+        Args:
+            symbol: Stock symbol
+            interval: Time interval
+            chunk_start: Chunk start date (YYYY-MM-DD)
+            chunk_end: Chunk end date (YYYY-MM-DD)
+            rows_fetched: Number of rows fetched
+            source: Data source ("cache" or "api")
+            status: Fetch status ("success", "failed", "cached")
+            retries: Number of retries attempted
+            warnings: Number of data quality warnings
+            error: Error message if failed
+        """
+        import json
+
+        entry = {
+            "timestamp": datetime.now().isoformat(),
+            "symbol": symbol,
+            "interval": interval,
+            "chunk_start": chunk_start,
+            "chunk_end": chunk_end,
+            "rows_fetched": rows_fetched,
+            "source": source,
+            "status": status,
+            "retries": retries,
+            "warnings": warnings,
+        }
+
+        if error:
+            entry["error"] = error
+
+        # Atomic append write
+        with open(self.fetch_log_path, "a") as f:
+            f.write(json.dumps(entry) + "\n")
 
     def split_date_range_into_chunks(
         self, start_dt: datetime, end_dt: datetime
@@ -178,7 +342,8 @@ class HistoricalDataFetcher:
 
         # Validate cache file has content
         try:
-            df = pd.read_csv(cache_path)
+            # US-028 Phase 6i: Parse timestamp column to avoid type comparison errors
+            df = pd.read_csv(cache_path, parse_dates=["timestamp"])
             return len(df) > 0
         except Exception as e:
             logger.warning(f"Invalid cache file {cache_path}: {e}")
@@ -186,8 +351,11 @@ class HistoricalDataFetcher:
 
     def validate_ohlcv_data(
         self, df: pd.DataFrame, symbol: str, date: str
-    ) -> tuple[bool, str | None]:
-        """Validate OHLCV DataFrame.
+    ) -> tuple[bool, str | None, pd.DataFrame, list[str]]:
+        """Validate OHLCV DataFrame and apply corrections for non-critical issues.
+
+        US-028 Phase 6j: Refactored to treat data quality anomalies as warnings
+        instead of fatal errors. Corrects negative volumes while preserving data.
 
         Args:
             df: DataFrame to validate
@@ -195,45 +363,66 @@ class HistoricalDataFetcher:
             date: Date string (for logging)
 
         Returns:
-            Tuple of (is_valid, error_message)
+            Tuple of (is_valid, error_message, corrected_df, warnings)
+            - is_valid: False only for hard errors (missing columns, empty data, unsorted timestamps)
+            - error_message: Critical error message if is_valid is False
+            - corrected_df: DataFrame with corrections applied (e.g., negative volumes clipped)
+            - warnings: List of warning messages for non-critical issues
         """
-        # Check required columns
+        warnings = []
+        corrected_df = df.copy()
+
+        # Check required columns (HARD ERROR)
         required_cols = ["timestamp", "open", "high", "low", "close", "volume"]
-        missing_cols = [col for col in required_cols if col not in df.columns]
+        missing_cols = [col for col in required_cols if col not in corrected_df.columns]
         if missing_cols:
-            return False, f"Missing columns: {missing_cols}"
+            return False, f"Missing columns: {missing_cols}", corrected_df, warnings
 
-        # Check non-empty
-        if len(df) == 0:
-            return False, "Empty DataFrame"
+        # Check non-empty (HARD ERROR)
+        if len(corrected_df) == 0:
+            return False, "Empty DataFrame", corrected_df, warnings
 
-        # Check for null values
-        if df[required_cols].isnull().any().any():
-            return False, "Contains null values"
+        # Check for null values (HARD ERROR - cannot safely correct)
+        if corrected_df[required_cols].isnull().any().any():
+            null_counts = corrected_df[required_cols].isnull().sum()
+            null_cols = [col for col in null_counts.index if null_counts[col] > 0]
+            return False, f"Contains null values in columns: {null_cols}", corrected_df, warnings
 
-        # Validate OHLC relationships
+        # Validate OHLC relationships (WARNING - log but don't fail)
         invalid_ohlc = (
-            (df["high"] < df["open"])
-            | (df["high"] < df["close"])
-            | (df["low"] > df["open"])
-            | (df["low"] > df["close"])
+            (corrected_df["high"] < corrected_df["open"])
+            | (corrected_df["high"] < corrected_df["close"])
+            | (corrected_df["low"] > corrected_df["open"])
+            | (corrected_df["low"] > corrected_df["close"])
         )
         if invalid_ohlc.any():
-            return False, f"Invalid OHLC relationships in {invalid_ohlc.sum()} rows"
+            count = invalid_ohlc.sum()
+            warnings.append(f"Invalid OHLC relationships in {count} rows (retained)")
+            logger.warning(
+                f"Data quality issue: {symbol} {date} has {count} invalid OHLC rows",
+                extra={"component": "validation", "symbol": symbol, "date": date, "issue": "invalid_ohlc"},
+            )
 
-        # Validate volume non-negative
-        if (df["volume"] < 0).any():
-            return False, "Negative volume values"
+        # Validate volume non-negative (WARNING - clip negatives to zero)
+        negative_volume = corrected_df["volume"] < 0
+        if negative_volume.any():
+            count = negative_volume.sum()
+            corrected_df.loc[negative_volume, "volume"] = 0
+            warnings.append(f"Negative volume in {count} rows (clipped to 0)")
+            logger.warning(
+                f"Data quality issue: {symbol} {date} has {count} negative volume rows, clipped to 0",
+                extra={"component": "validation", "symbol": symbol, "date": date, "issue": "negative_volume", "corrected_rows": count},
+            )
 
-        # Validate timestamp ordering
+        # Validate timestamp ordering (HARD ERROR)
         try:
-            timestamps = pd.to_datetime(df["timestamp"])
+            timestamps = pd.to_datetime(corrected_df["timestamp"])
             if not timestamps.is_monotonic_increasing:
-                return False, "Timestamps not in ascending order"
+                return False, "Timestamps not in ascending order", corrected_df, warnings
         except Exception as e:
-            return False, f"Invalid timestamps: {e}"
+            return False, f"Invalid timestamps: {e}", corrected_df, warnings
 
-        return True, None
+        return True, None, corrected_df, warnings
 
     @tenacity.retry(
         stop=tenacity.stop_after_attempt(3),
@@ -301,7 +490,7 @@ class HistoricalDataFetcher:
             return None
 
     def save_to_cache(self, df: pd.DataFrame, symbol: str, interval: str, date: str) -> None:
-        """Save DataFrame to cache file.
+        """Save DataFrame to cache file with deduplication (US-028 Phase 7 Initiative 1).
 
         Args:
             df: DataFrame to save
@@ -314,12 +503,58 @@ class HistoricalDataFetcher:
         # Create directory
         cache_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # If file exists and is read-only, make it writable temporarily
+        # US-028 Phase 7 Initiative 1: Deduplication logic
+        # If file exists, merge with existing data and remove duplicates
+        existing_df = None
         if cache_path.exists():
             try:
                 cache_path.chmod(0o644)
-            except Exception:
-                pass  # Ignore permission errors
+                # Load existing data
+                existing_df = pd.read_csv(cache_path)
+                logger.debug(f"Loaded {len(existing_df)} existing rows from {cache_path}")
+            except Exception as e:
+                logger.warning(f"Could not load existing cache file {cache_path}: {e}")
+                existing_df = None
+
+        # Merge with existing data if present
+        if existing_df is not None and len(existing_df) > 0:
+            # Make copies to avoid SettingWithCopyWarning
+            existing_df = existing_df.copy()
+            df = df.copy()
+
+            # Normalize datetime columns to same type before concatenating
+            for col in ["datetime", "timestamp"]:
+                if col in existing_df.columns and col in df.columns:
+                    # Convert both to datetime
+                    existing_df[col] = pd.to_datetime(existing_df[col])
+                    df[col] = pd.to_datetime(df[col])
+
+            # Concatenate new and existing data
+            combined_df = pd.concat([existing_df, df], ignore_index=True)
+            original_count = len(combined_df)
+
+            # Remove duplicates based on timestamp (keep last occurrence to allow corrections)
+            if "datetime" in combined_df.columns:
+                combined_df = combined_df.drop_duplicates(subset=["datetime"], keep="last")
+            elif "timestamp" in combined_df.columns:
+                combined_df = combined_df.drop_duplicates(subset=["timestamp"], keep="last")
+
+            duplicates_removed = original_count - len(combined_df)
+
+            if duplicates_removed > 0:
+                logger.warning(
+                    f"Removed {duplicates_removed} duplicate rows for {symbol} {date}",
+                    extra={"component": "deduplication", "duplicates": duplicates_removed},
+                )
+                self.stats["duplicates_removed"] += duplicates_removed
+
+            # Sort by timestamp
+            if "datetime" in combined_df.columns:
+                combined_df = combined_df.sort_values("datetime").reset_index(drop=True)
+            elif "timestamp" in combined_df.columns:
+                combined_df = combined_df.sort_values("timestamp").reset_index(drop=True)
+
+            df = combined_df
 
         # Save CSV
         df.to_csv(cache_path, index=False)
@@ -357,7 +592,20 @@ class HistoricalDataFetcher:
         if not force and self.is_cached(symbol, interval, date):
             logger.debug(f"Cache hit: {symbol} {date} {interval}")
             self.stats["cached_hits"] += 1
+            # US-028 Phase 7 Initiative 1: Log cache hit
+            self.log_fetch_entry(
+                symbol=symbol,
+                interval=interval,
+                chunk_start=date,
+                chunk_end=date,
+                rows_fetched=0,
+                source="cache",
+                status="cached",
+            )
             return True
+
+        # US-028 Phase 7 Initiative 1: Enforce rate limiting before API call
+        self.enforce_rate_limit()
 
         # Fetch from API
         try:
@@ -366,27 +614,89 @@ class HistoricalDataFetcher:
             if df is None or len(df) == 0:
                 logger.warning(f"No data returned for {symbol} {date} {interval}")
                 self.stats["failures"] += 1
+                # US-028 Phase 7 Initiative 1: Log empty result
+                self.log_fetch_entry(
+                    symbol=symbol,
+                    interval=interval,
+                    chunk_start=date,
+                    chunk_end=date,
+                    rows_fetched=0,
+                    source="api",
+                    status="failed",
+                    error="No data returned",
+                )
                 return False
 
-            # Validate
-            is_valid, error_msg = self.validate_ohlcv_data(df, symbol, date)
+            # Validate and correct data quality issues (US-028 Phase 6j)
+            is_valid, error_msg, corrected_df, warnings = self.validate_ohlcv_data(df, symbol, date)
             if not is_valid:
                 logger.error(f"Validation failed for {symbol} {date}: {error_msg}")
                 self.stats["failures"] += 1
+                # US-028 Phase 7 Initiative 1: Log validation failure
+                self.log_fetch_entry(
+                    symbol=symbol,
+                    interval=interval,
+                    chunk_start=date,
+                    chunk_end=date,
+                    rows_fetched=len(df),
+                    source="api",
+                    status="failed",
+                    error=error_msg,
+                )
                 return False
 
-            # Save to cache
-            self.save_to_cache(df, symbol, interval, date)
+            # Track warnings
+            warning_count = len(warnings) if warnings else 0
+            if warnings:
+                self.stats["warnings"] += warning_count
+
+            # Save to cache (use corrected data)
+            self.save_to_cache(corrected_df, symbol, interval, date)
             self.stats["downloads"] += 1
+
+            # US-028 Phase 7 Initiative 1: Log successful fetch
+            self.log_fetch_entry(
+                symbol=symbol,
+                interval=interval,
+                chunk_start=date,
+                chunk_end=date,
+                rows_fetched=len(corrected_df),
+                source="api",
+                status="success",
+                warnings=warning_count,
+            )
             return True
 
         except tenacity.RetryError as e:
             logger.error(f"All retries exhausted for {symbol} {date}: {e}")
             self.stats["failures"] += 1
+            # US-028 Phase 7 Initiative 1: Log retry exhaustion
+            self.log_fetch_entry(
+                symbol=symbol,
+                interval=interval,
+                chunk_start=date,
+                chunk_end=date,
+                rows_fetched=0,
+                source="api",
+                status="failed",
+                retries=self.settings.breeze_max_retries,
+                error=str(e),
+            )
             return False
         except Exception as e:
             logger.error(f"Unexpected error for {symbol} {date}: {e}")
             self.stats["failures"] += 1
+            # US-028 Phase 7 Initiative 1: Log unexpected error
+            self.log_fetch_entry(
+                symbol=symbol,
+                interval=interval,
+                chunk_start=date,
+                chunk_end=date,
+                rows_fetched=0,
+                source="api",
+                status="failed",
+                error=str(e),
+            )
             return False
 
     def fetch_symbol_date_range_chunked(
@@ -453,15 +763,40 @@ class HistoricalDataFetcher:
                 # Load from cache (load all days in chunk)
                 logger.debug(f"Loading chunk {i}/{len(chunks)} from cache")
                 chunk_dates = self.generate_date_list(chunk_start, chunk_end)
+                chunk_data = []
                 for date_str in chunk_dates:
                     cache_path = self.get_cache_path(symbol, interval, date_str)
                     if cache_path.exists():
                         try:
-                            df = pd.read_csv(cache_path)
+                            # US-028 Phase 6i: Parse timestamp column to avoid type comparison errors
+                            df = pd.read_csv(cache_path, parse_dates=["timestamp"])
                             if len(df) > 0:
-                                all_data.append(df)
+                                chunk_data.append(df)
                         except Exception as e:
                             logger.warning(f"Failed to load cache {cache_path}: {e}")
+
+                # US-028 Phase 6j: Validate and correct cached data
+                if chunk_data:
+                    combined_chunk = pd.concat(chunk_data, ignore_index=True)
+                    is_valid, error_msg, corrected_chunk, warnings = self.validate_ohlcv_data(
+                        combined_chunk, symbol, str(chunk_start.date())
+                    )
+                    if not is_valid:
+                        logger.error(f"Cached chunk {i}/{len(chunks)} invalid: {error_msg}")
+                        failed_chunks.append((chunk_start, chunk_end))
+                        self.stats["chunks_failed"] += 1
+                        continue
+
+                    # Track warnings
+                    if warnings:
+                        self.stats["warnings"] += len(warnings)
+                        logger.info(f"Cached chunk {i}/{len(chunks)} warnings: {', '.join(warnings)}")
+                        # Re-save corrected data to cache
+                        for date_str in corrected_chunk["timestamp"].dt.strftime("%Y-%m-%d").unique():
+                            df_day = corrected_chunk[corrected_chunk["timestamp"].dt.strftime("%Y-%m-%d") == date_str]
+                            self.save_to_cache(df_day, symbol, interval, date_str)
+
+                    all_data.append(corrected_chunk)
                 continue
 
             # Fetch chunk from API
@@ -510,8 +845,8 @@ class HistoricalDataFetcher:
                     self.stats["chunks_failed"] += 1
                     continue
 
-                # Validate chunk
-                is_valid, error_msg = self.validate_ohlcv_data(
+                # Validate chunk and correct data quality issues (US-028 Phase 6j)
+                is_valid, error_msg, corrected_chunk, warnings = self.validate_ohlcv_data(
                     df_chunk, symbol, str(chunk_start.date())
                 )
                 if not is_valid:
@@ -520,13 +855,19 @@ class HistoricalDataFetcher:
                     self.stats["chunks_failed"] += 1
                     continue
 
+                # Track warnings
+                if warnings:
+                    self.stats["warnings"] += len(warnings)
+                    logger.info(f"Chunk {i}/{len(chunks)} warnings: {', '.join(warnings)}")
+
                 # Save chunk to cache (split by day for consistency with existing cache structure)
-                df_chunk["timestamp"] = pd.to_datetime(df_chunk["timestamp"])
-                for date_str in df_chunk["timestamp"].dt.strftime("%Y-%m-%d").unique():
-                    df_day = df_chunk[df_chunk["timestamp"].dt.strftime("%Y-%m-%d") == date_str]
+                # Use corrected data with fixes applied
+                corrected_chunk["timestamp"] = pd.to_datetime(corrected_chunk["timestamp"])
+                for date_str in corrected_chunk["timestamp"].dt.strftime("%Y-%m-%d").unique():
+                    df_day = corrected_chunk[corrected_chunk["timestamp"].dt.strftime("%Y-%m-%d") == date_str]
                     self.save_to_cache(df_day, symbol, interval, date_str)
 
-                all_data.append(df_chunk)
+                all_data.append(corrected_chunk)
                 self.stats["chunks_fetched"] += 1
                 self.stats["downloads"] += 1
 
@@ -560,15 +901,35 @@ class HistoricalDataFetcher:
 
         combined_df = pd.concat(all_data, ignore_index=True)
 
+        # US-028 Phase 6i: Ensure timestamp column is datetime type (normalize cached vs API data)
+        try:
+            if "timestamp" in combined_df.columns:
+                # Convert to datetime if not already (handles string timestamps from cache)
+                if not pd.api.types.is_datetime64_any_dtype(combined_df["timestamp"]):
+                    combined_df["timestamp"] = pd.to_datetime(combined_df["timestamp"], utc=True)
+                    logger.debug(f"Converted timestamp column to datetime for {symbol} {interval}")
+        except Exception as e:
+            error_msg = f"Failed to normalize timestamp column for {symbol} {interval}: {e}"
+            logger.error(error_msg)
+            raise RuntimeError(error_msg) from e
+
         # Remove duplicates (in case of overlapping chunks)
         combined_df = combined_df.drop_duplicates(subset=["timestamp"], keep="first")
 
-        # Sort by timestamp
+        # Sort by timestamp (now safe since all timestamps are same type)
         combined_df = combined_df.sort_values("timestamp").reset_index(drop=True)
 
         logger.info(
             f"✓ Combined {len(all_data)} chunk(s) into {len(combined_df)} rows for {symbol} {interval}"
         )
+
+        # US-028 Phase 7 Initiative 1: Detect gaps in fetched data
+        gaps = self.detect_gaps(combined_df, symbol, start_dt, end_dt)
+        if gaps:
+            logger.warning(
+                f"Gap detection summary for {symbol}: {len(gaps)} gap(s) found",
+                extra={"symbol": symbol, "gaps": gaps},
+            )
 
         return combined_df
 
@@ -612,21 +973,46 @@ class HistoricalDataFetcher:
             f"(vs {len(symbols) * len(intervals) * (end_dt - start_dt).days} without chunking)"
         )
 
-        # Fetch data using chunked ingestion
-        for symbol in symbols:
-            for interval in intervals:
-                try:
-                    df = self.fetch_symbol_date_range_chunked(
-                        symbol, start_dt, end_dt, interval, force=force
-                    )
+        # US-028 Phase 7 Initiative 4: Progress monitoring with tqdm
+        total_tasks = len(symbols) * len(intervals)
+        with tqdm(total=total_tasks, desc="Fetching historical data", unit="symbol-interval") as pbar:
+            for symbol in symbols:
+                for interval in intervals:
+                    try:
+                        df = self.fetch_symbol_date_range_chunked(
+                            symbol, start_dt, end_dt, interval, force=force
+                        )
 
-                    if df is None or len(df) == 0:
-                        logger.warning(f"No data fetched for {symbol} {interval}")
+                        if df is None or len(df) == 0:
+                            logger.warning(f"No data fetched for {symbol} {interval}")
+                            self.stats["failures"] += 1
+                            pbar.set_postfix({
+                                "symbol": symbol,
+                                "status": "no_data",
+                                "cached": self.stats["cached_hits"],
+                                "fetched": self.stats["downloads"],
+                            })
+                        else:
+                            pbar.set_postfix({
+                                "symbol": symbol,
+                                "status": "ok",
+                                "rows": len(df),
+                                "cached": self.stats["cached_hits"],
+                                "fetched": self.stats["downloads"],
+                            })
+
+                    except Exception as e:
+                        # US-028 Phase 6i: Include exception type for better debugging
+                        logger.error(f"Failed to fetch {symbol} {interval}: {type(e).__name__}: {e}")
                         self.stats["failures"] += 1
+                        pbar.set_postfix({
+                            "symbol": symbol,
+                            "status": "error",
+                            "error": type(e).__name__,
+                        })
 
-                except Exception as e:
-                    logger.error(f"Failed to fetch {symbol} {interval}: {e}")
-                    self.stats["failures"] += 1
+                    # US-028 Phase 7 Initiative 4: Update progress bar
+                    pbar.update(1)
 
         # Generate summary
         summary = {
@@ -637,6 +1023,7 @@ class HistoricalDataFetcher:
             "total_rows": self.stats["total_rows"],
             "chunks_fetched": self.stats["chunks_fetched"],
             "chunks_failed": self.stats["chunks_failed"],
+            "warnings": self.stats["warnings"],  # US-028 Phase 6j: Data quality warnings
             "cache_hit_rate": (
                 self.stats["cached_hits"] / self.stats["total_requests"]
                 if self.stats["total_requests"] > 0
@@ -657,6 +1044,22 @@ def parse_args() -> argparse.Namespace:
         "--symbols",
         nargs="+",
         help="Stock symbols to download (default: from settings)",
+    )
+    parser.add_argument(
+        "--symbols-mode",
+        type=str,
+        choices=["pilot", "nifty100", "metals_etfs", "all"],
+        help="Load symbols from metadata (US-028 Phase 7 Initiative 1): pilot (5 symbols), nifty100 (100), metals_etfs (2), all (102)",
+    )
+    parser.add_argument(
+        "--max-symbols",
+        type=int,
+        help="Limit number of symbols from --symbols-mode (e.g., --symbols-mode nifty100 --max-symbols 20)",
+    )
+    parser.add_argument(
+        "--symbols-file",
+        type=str,
+        help="Path to text file with one symbol per line (alternative to --symbols or --symbols-mode)",
     )
     parser.add_argument(
         "--start-date",
@@ -704,8 +1107,38 @@ def main() -> int:
     # Load settings
     settings = Settings()  # type: ignore[call-arg]
 
-    # Use command-line args or settings defaults
-    symbols = args.symbols if args.symbols else settings.historical_data_symbols
+    # US-028 Phase 7 Initiative 1: Load symbols from metadata if symbols_mode specified
+    # US-028 Phase 7 CLI Hardening: Support --symbols-file and --max-symbols
+    if args.symbols_file:
+        # Load symbols from file (one symbol per line)
+        symbols_file_path = Path(args.symbols_file)
+        if not symbols_file_path.exists():
+            logger.error(f"Symbols file not found: {symbols_file_path}")
+            return 1
+
+        try:
+            with open(symbols_file_path) as f:
+                symbols = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+            logger.info(f"Loaded {len(symbols)} symbols from {symbols_file_path}")
+            logger.info(f"  → Symbols: {', '.join(symbols[:5])}{'...' if len(symbols) > 5 else ''}")
+        except Exception as e:
+            logger.error(f"Failed to read symbols file {symbols_file_path}: {e}")
+            return 1
+    elif args.symbols_mode:
+        logger.info(f"Loading symbols from metadata (mode={args.symbols_mode})")
+        symbols = settings.get_symbols_for_mode(args.symbols_mode)
+        logger.info(f"  → Loaded {len(symbols)} symbols: {', '.join(symbols[:5])}{'...' if len(symbols) > 5 else ''}")
+    else:
+        # Use command-line args or settings defaults
+        symbols = args.symbols if args.symbols else settings.historical_data_symbols
+
+    # US-028 Phase 7 CLI Hardening: Apply --max-symbols limit
+    if args.max_symbols and args.max_symbols > 0:
+        original_count = len(symbols)
+        symbols = symbols[:args.max_symbols]
+        logger.info(f"Applied --max-symbols limit: {original_count} → {len(symbols)} symbols")
+        logger.info(f"  → Limited to: {', '.join(symbols)}")
+
     intervals = args.intervals if args.intervals else settings.historical_data_intervals
 
     # US-024 Phase 4: Incremental mode support
@@ -816,6 +1249,8 @@ def main() -> int:
     logger.info(f"Chunks failed: {summary['chunks_failed']}")
     logger.info(f"Failures: {summary['failures']}")
     logger.info(f"Total rows: {summary['total_rows']}")
+    if summary.get("warnings", 0) > 0:
+        logger.warning(f"Data quality warnings: {summary['warnings']} (see logs for details)")  # US-028 Phase 6j
     logger.info("=" * 70)
 
     # US-024 Phase 4: Update state after successful fetch

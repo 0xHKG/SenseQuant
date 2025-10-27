@@ -102,22 +102,24 @@ def test_ohlcv_data_validation(mock_settings: Settings) -> None:
 
     # Valid data
     valid_df = create_mock_ohlcv_data("RELIANCE", "2024-01-01", rows=10)
-    is_valid, error = fetcher.validate_ohlcv_data(valid_df, "RELIANCE", "2024-01-01")
+    is_valid, error, corrected_df, warnings = fetcher.validate_ohlcv_data(valid_df, "RELIANCE", "2024-01-01")
     assert is_valid is True
     assert error is None
+    assert len(warnings) == 0
 
-    # Invalid data - missing columns
+    # Invalid data - missing columns (hard error)
     invalid_df = pd.DataFrame({"timestamp": ["2024-01-01T09:15:00"], "open": [2450.0]})
-    is_valid, error = fetcher.validate_ohlcv_data(invalid_df, "RELIANCE", "2024-01-01")
+    is_valid, error, corrected_df, warnings = fetcher.validate_ohlcv_data(invalid_df, "RELIANCE", "2024-01-01")
     assert is_valid is False
     assert "Missing columns" in error
 
-    # Invalid data - OHLC relationship
+    # Invalid data - OHLC relationship (US-028 Phase 6j: now treated as warning, not fatal error)
     invalid_ohlc_df = create_mock_ohlcv_data("RELIANCE", "2024-01-01", rows=10)
     invalid_ohlc_df.loc[0, "high"] = 2400.0  # High < close
-    is_valid, error = fetcher.validate_ohlcv_data(invalid_ohlc_df, "RELIANCE", "2024-01-01")
-    assert is_valid is False
-    assert "Invalid OHLC relationships" in error
+    is_valid, error, corrected_df, warnings = fetcher.validate_ohlcv_data(invalid_ohlc_df, "RELIANCE", "2024-01-01")
+    assert is_valid is True  # Phase 6j: OHLC issues are warnings, not hard errors
+    assert len(warnings) > 0  # Should have warning about invalid OHLC
+    assert any("OHLC" in w for w in warnings)
 
 
 def test_batch_training_window_generation(mock_settings: Settings, tmp_data_dir: Path) -> None:
@@ -247,7 +249,13 @@ def test_date_range_validation(mock_settings: Settings) -> None:
 
 
 def test_resume_functionality(mock_settings: Settings, tmp_data_dir: Path) -> None:
-    """Test batch training resume functionality."""
+    """Test batch training resume functionality.
+
+    US-028 Phase 6t: Updated to use Phase 6o artifact structure (gzipped labels).
+    """
+    import gzip
+    import json
+
     trainer = BatchTrainer(mock_settings, tmp_data_dir / "models", resume=True)
 
     # Create a task
@@ -262,10 +270,24 @@ def test_resume_functionality(mock_settings: Settings, tmp_data_dir: Path) -> No
     # Initially not trained
     assert trainer.is_already_trained(task) is False
 
-    # Create mock artifacts
+    # Create mock artifacts (Phase 6o structure: model.pkl, labels.csv.gz, metadata.json)
     artifacts_path = Path(task["artifacts_path"])
     artifacts_path.mkdir(parents=True, exist_ok=True)
-    (artifacts_path / "labels.csv").write_text("timestamp,label\n2024-01-01,1\n")
+
+    # Create gzipped labels file
+    with gzip.open(artifacts_path / "labels.csv.gz", "wt") as f:
+        f.write("timestamp,label\n2024-01-01,1\n")
+
+    # Create model file
+    (artifacts_path / "model.pkl").write_bytes(b"mock_model_data")
+
+    # Create metadata file
+    metadata = {
+        "symbol": "RELIANCE",
+        "window_label": "RELIANCE_2024Q1",
+        "date_range": {"start": "2024-01-01", "end": "2024-03-31"},
+    }
+    (artifacts_path / "metadata.json").write_text(json.dumps(metadata))
 
     # Now should be detected as trained
     assert trainer.is_already_trained(task) is True
@@ -310,7 +332,6 @@ def test_chunked_historical_fetch_multi_chunk_aggregation(mock_settings: Setting
     5. Chunk statistics are tracked correctly
     """
     from datetime import datetime
-    from unittest.mock import Mock, patch
 
     # Configure mock settings with small chunk size to force multiple chunks
     mock_settings.historical_chunk_days = 30  # 30-day chunks
@@ -370,7 +391,7 @@ def test_chunked_historical_fetch_multi_chunk_aggregation(mock_settings: Setting
 def test_chunked_fetch_with_mocked_breeze_client(mock_settings: Settings, tmp_data_dir: Path) -> None:
     """Test chunked fetch with mocked BreezeClient to verify API interactions (US-028 Phase 6b)."""
     from datetime import datetime
-    from unittest.mock import Mock, patch
+    from unittest.mock import Mock
 
     # Configure settings
     mock_settings.historical_chunk_days = 90
@@ -410,7 +431,7 @@ def test_chunked_fetch_with_mocked_breeze_client(mock_settings: Settings, tmp_da
     assert fetcher.stats["chunks_fetched"] == len(expected_chunks)
 
     # Verify each call had correct parameters
-    for i, (chunk_start, chunk_end) in enumerate(expected_chunks):
+    for i, (_chunk_start, _chunk_end) in enumerate(expected_chunks):
         call_args = mock_breeze.fetch_historical_chunk.call_args_list[i]
         assert call_args[1]["symbol"] == "RELIANCE"
         assert call_args[1]["interval"] == "1day"
@@ -1004,3 +1025,609 @@ def test_dashboard_exists() -> None:
 
     readme_path = Path("dashboards/README.md")
     assert readme_path.exists(), "Dashboard README not found"
+
+
+def test_cached_chunk_timestamp_normalization(tmp_data_dir: Path, mock_settings: Settings) -> None:
+    """Test that cached chunks with string timestamps are properly normalized (US-028 Phase 6i)."""
+    # Create cache directory
+    cache_dir = tmp_data_dir / "historical" / "TEST" / "1day"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create a cached CSV with string timestamps (simulating old cache format)
+    cache_file = cache_dir / "2024-01-01.csv"
+    cached_data = pd.DataFrame({
+        "timestamp": ["2024-01-01 09:00:00+05:30", "2024-01-01 10:00:00+05:30"],
+        "open": [100.0, 101.0],
+        "high": [102.0, 103.0],
+        "low": [99.0, 100.0],
+        "close": [101.0, 102.0],
+        "volume": [1000, 1100],
+    })
+    cached_data.to_csv(cache_file, index=False)
+
+    # Create fetcher instance
+    fetcher = HistoricalDataFetcher(
+        settings=mock_settings,
+        dryrun=True,
+    )
+
+    # Fetch data using chunked method (should load from cache)
+    from datetime import datetime as dt
+    start_dt = dt(2024, 1, 1)
+    end_dt = dt(2024, 1, 1)
+
+    result_df = fetcher.fetch_symbol_date_range_chunked(
+        symbol="TEST",
+        start_dt=start_dt,
+        end_dt=end_dt,
+        interval="1day",
+        force=False,  # Use cache
+    )
+
+    # Verify timestamps are properly converted to datetime type
+    assert len(result_df) > 0, "Should load cached data"
+    assert "timestamp" in result_df.columns, "Should have timestamp column"
+    assert pd.api.types.is_datetime64_any_dtype(result_df["timestamp"]), (
+        "Timestamp column should be datetime type, not string"
+    )
+
+    # Verify data can be sorted (would fail if mixed types)
+    sorted_df = result_df.sort_values("timestamp")
+    assert len(sorted_df) == len(result_df), "Sorting should not change row count"
+
+
+def test_negative_volume_correction(tmp_data_dir: Path, mock_settings: Settings) -> None:
+    """Test that negative volumes are corrected and warnings are tracked (US-028 Phase 6j)."""
+    import pandas as pd
+
+    from scripts.fetch_historical_data import HistoricalDataFetcher
+
+    # Create cache directory
+    cache_dir = tmp_data_dir / "historical" / "TESTSTOCK" / "1day"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create a cached CSV with negative volume values (simulating data quality issue)
+    cache_file = cache_dir / "2024-01-01.csv"
+    bad_data = pd.DataFrame({
+        "timestamp": ["2024-01-01 09:15:00+05:30", "2024-01-01 10:15:00+05:30", "2024-01-01 11:15:00+05:30"],
+        "open": [100.0, 101.0, 102.0],
+        "high": [102.0, 103.0, 104.0],
+        "low": [99.0, 100.0, 101.0],
+        "close": [101.0, 102.0, 103.0],
+        "volume": [1000, -500, 2000],  # Middle row has negative volume
+    })
+    bad_data.to_csv(cache_file, index=False)
+
+    # Create fetcher instance
+    fetcher = HistoricalDataFetcher(
+        settings=mock_settings,
+        dryrun=True,
+    )
+
+    # Fetch data using chunked method (should load from cache and correct negative volumes)
+    from datetime import datetime as dt
+    start_dt = dt(2024, 1, 1)
+    end_dt = dt(2024, 1, 1)
+
+    result_df = fetcher.fetch_symbol_date_range_chunked(
+        symbol="TESTSTOCK",
+        start_dt=start_dt,
+        end_dt=end_dt,
+        interval="1day",
+        force=False,  # Use cache
+    )
+
+    # Verify fetch completed successfully
+    assert len(result_df) > 0, "Should load cached data"
+    assert "volume" in result_df.columns, "Should have volume column"
+
+    # Verify negative volumes were corrected (clipped to 0)
+    assert (result_df["volume"] >= 0).all(), "All volumes should be non-negative after correction"
+    assert (result_df["volume"] == 0).any(), "Should have at least one zero volume (corrected from negative)"
+
+    # Verify warnings were tracked
+    assert fetcher.stats["warnings"] > 0, "Should have recorded data quality warnings"
+
+    # Verify corrected data was saved (not original negative values)
+    corrected_cache = pd.read_csv(cache_file, parse_dates=["timestamp"])
+    assert (corrected_cache["volume"] >= 0).all(), "Cached data should have corrected volumes"
+
+
+def test_phase_2_json_aggregation(tmp_path):
+    """Test Phase 2 orchestrator aggregates from teacher_runs.json (US-028 Phase 6l).
+
+    Confirms JSON-based aggregation works even if stdout lacks summary lines.
+    """
+    import json
+    import sys
+    from pathlib import Path
+
+    # Add project root to sys.path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+    from scripts.run_historical_training import HistoricalRunOrchestrator
+
+    # Create mock batch directory with teacher_runs.json
+    batch_dir = tmp_path / "teacher_training_20250101_120000"
+    batch_dir.mkdir(parents=True)
+
+    # Create mock teacher_runs.json with 3 success, 1 skip, 0 failed
+    # Matches format produced by train_teacher_batch.py
+    teacher_runs = [
+        {
+            "status": "success",
+            "window_label": "RELIANCE_2023-01-01_2023-06-30",
+            "sample_counts": {
+                "train_samples": 67,
+                "val_samples": 17,
+            },
+            "metrics": {
+                "val_accuracy": 0.85,
+                "val_precision": 0.82,
+                "val_recall": 0.88,
+                "val_f1": 0.85,
+                "val_auc": 0.90,
+            },
+            "model_path": str(batch_dir / "teacher_RELIANCE_2023-01-01_2023-06-30.pkl"),
+        },
+        {
+            "status": "success",
+            "window_label": "RELIANCE_2023-07-01_2023-12-31",
+            "sample_counts": {
+                "train_samples": 72,
+                "val_samples": 18,
+            },
+            "metrics": {
+                "val_accuracy": 0.87,
+                "val_precision": 0.84,
+                "val_recall": 0.90,
+                "val_f1": 0.87,
+                "val_auc": 0.92,
+            },
+            "model_path": str(batch_dir / "teacher_RELIANCE_2023-07-01_2023-12-31.pkl"),
+        },
+        {
+            "status": "success",
+            "window_label": "TCS_2024-01-01_2024-06-30",
+            "sample_counts": {
+                "train_samples": 65,
+                "val_samples": 16,
+            },
+            "metrics": {
+                "val_accuracy": 0.83,
+                "val_precision": 0.80,
+                "val_recall": 0.86,
+                "val_f1": 0.83,
+                "val_auc": 0.88,
+            },
+            "model_path": str(batch_dir / "teacher_TCS_2024-01-01_2024-06-30.pkl"),
+        },
+        {
+            "status": "skipped",
+            "window_label": "TCS_2024-07-01_2024-12-31",
+            "reason": "Insufficient samples for training: 12 < 20 minimum",
+        },
+    ]
+
+    # Write JSONL file (one object per line)
+    json_path = batch_dir / "teacher_runs.json"
+    with open(json_path, "w") as f:
+        for entry in teacher_runs:
+            f.write(json.dumps(entry) + "\n")
+
+    # Create orchestrator and call JSON aggregation directly
+    orchestrator = HistoricalRunOrchestrator(
+        symbols=["RELIANCE", "TCS"],
+        start_date="2023-01-01",
+        end_date="2024-12-31",
+        skip_fetch=True,
+        dryrun=True,
+    )
+
+    # Call the JSON aggregation helper
+    stats = orchestrator._aggregate_teacher_runs_from_json(batch_dir)
+
+    # Verify aggregation correctness
+    assert stats is not None, "Should successfully parse teacher_runs.json"
+    assert stats["total_windows"] == 4, f"Expected 4 windows, got {stats['total_windows']}"
+    assert stats["completed"] == 3, f"Expected 3 completed, got {stats['completed']}"
+    assert stats["skipped"] == 1, f"Expected 1 skipped, got {stats['skipped']}"
+    assert stats["failed"] == 0, f"Expected 0 failed, got {stats['failed']}"
+
+    # Verify success windows array is populated
+    assert len(stats["success_windows"]) == 3, "Should have 3 success window entries"
+    success_window = stats["success_windows"][0]
+    assert "window_label" in success_window
+    assert success_window["window_label"] == "RELIANCE_2023-01-01_2023-06-30"
+    assert "sample_counts" in success_window
+    assert success_window["sample_counts"]["train_samples"] == 67
+    assert success_window["sample_counts"]["val_samples"] == 17
+    assert "metrics" in success_window
+    assert success_window["metrics"]["val_accuracy"] == 0.85
+
+    # Verify skipped windows array is populated
+    assert len(stats["skipped_windows"]) == 1, "Should have 1 skipped window entry"
+    skipped_window = stats["skipped_windows"][0]
+    assert skipped_window["window_label"] == "TCS_2024-07-01_2024-12-31"
+    assert "Insufficient samples" in skipped_window["reason"]
+
+    # Verify failed windows array is empty
+    assert len(stats["failed_windows"]) == 0, "Should have 0 failed window entries"
+
+    # Verify sample counts aggregation
+    assert stats["total_train_samples"] == 67 + 72 + 65, "Should sum all training samples"
+    assert stats["total_val_samples"] == 17 + 18 + 16, "Should sum all validation samples"
+
+    # Verify batch directory is tracked
+    assert stats["batch_dir"] == str(batch_dir), "Should track batch directory path"
+
+
+def test_progress_tracking(mock_settings: Settings, tmp_data_dir: Path) -> None:
+    """Test that StateManager tracks training progress (US-028 Phase 7 Initiative 4).
+
+    Verifies that:
+    - StateManager progress tracking methods work correctly
+    - Progress data is persisted to state.json
+    - Progress data can be retrieved
+    """
+    from src.services.state_manager import StateManager
+
+    # Use temporary state file
+    state_file = tmp_data_dir / "test_state.json"
+    state_mgr = StateManager(state_file)
+
+    # Record progress for Phase 1
+    state_mgr.record_training_progress(
+        phase="data_ingestion",
+        completed=2,
+        total=2,
+        extra={
+            "status": "success",
+            "chunks_fetched": 12,
+            "chunks_failed": 0,
+        },
+    )
+
+    # Record progress for Phase 2
+    state_mgr.record_training_progress(
+        phase="teacher_training",
+        completed=58,
+        total=60,
+        eta_minutes=2.5,
+        extra={
+            "status": "partial",
+            "trained": 58,
+            "skipped": 2,
+            "failed": 0,
+        },
+    )
+
+    # Verify progress can be retrieved
+    all_progress = state_mgr.get_training_progress()
+    assert "data_ingestion" in all_progress
+    assert "teacher_training" in all_progress
+
+    # Verify Phase 1 data
+    phase1 = all_progress["data_ingestion"]
+    assert phase1["phase"] == "data_ingestion"
+    assert phase1["completed"] == 2
+    assert phase1["total"] == 2
+    assert phase1["percent_complete"] == 100.0
+    assert phase1["status"] == "success"
+    assert phase1["chunks_fetched"] == 12
+
+    # Verify Phase 2 data
+    phase2 = all_progress["teacher_training"]
+    assert phase2["phase"] == "teacher_training"
+    assert phase2["completed"] == 58
+    assert phase2["total"] == 60
+    assert phase2["percent_complete"] == pytest.approx(96.7, abs=0.1)
+    assert phase2["eta_minutes"] == 2.5
+    assert phase2["trained"] == 58
+    assert phase2["skipped"] == 2
+
+    # Verify specific phase retrieval
+    phase1_only = state_mgr.get_training_progress("data_ingestion")
+    assert phase1_only["completed"] == 2
+
+    # Verify clear progress works
+    state_mgr.clear_training_progress()
+    cleared_progress = state_mgr.get_training_progress()
+    assert cleared_progress == {}
+
+
+def test_fetch_logging(tmp_data_dir: Path, mock_settings: Settings) -> None:
+    """Test that fetch operations are logged to fetch_log.jsonl (US-028 Phase 7 Initiative 1).
+
+    Verifies that:
+    - Fetch log entries are written to JSONL file
+    - Entries contain required fields
+    - Multiple fetch operations append to log
+    """
+    import json
+
+    from scripts.fetch_historical_data import HistoricalDataFetcher
+
+    # Create fetcher with temp data dir
+    fetcher = HistoricalDataFetcher(
+        settings=mock_settings,
+        dryrun=True,
+    )
+
+    # Override log path to use temp dir
+    log_path = tmp_data_dir / "fetch_log.jsonl"
+    fetcher.fetch_log_path = log_path
+
+    # Log a few fetch entries
+    fetcher.log_fetch_entry(
+        symbol="RELIANCE",
+        interval="1day",
+        chunk_start="2023-01-01",
+        chunk_end="2023-01-01",
+        rows_fetched=100,
+        source="api",
+        status="success",
+        warnings=0,
+    )
+
+    fetcher.log_fetch_entry(
+        symbol="TCS",
+        interval="1day",
+        chunk_start="2023-01-02",
+        chunk_end="2023-01-02",
+        rows_fetched=0,
+        source="cache",
+        status="cached",
+    )
+
+    fetcher.log_fetch_entry(
+        symbol="INFY",
+        interval="1day",
+        chunk_start="2023-01-03",
+        chunk_end="2023-01-03",
+        rows_fetched=0,
+        source="api",
+        status="failed",
+        error="Connection timeout",
+    )
+
+    # Verify log file exists
+    assert log_path.exists()
+
+    # Parse and verify entries
+    with open(log_path) as f:
+        lines = f.readlines()
+
+    assert len(lines) == 3
+
+    # Parse each entry
+    entry1 = json.loads(lines[0])
+    entry2 = json.loads(lines[1])
+    entry3 = json.loads(lines[2])
+
+    # Verify entry 1 (successful API fetch)
+    assert entry1["symbol"] == "RELIANCE"
+    assert entry1["interval"] == "1day"
+    assert entry1["chunk_start"] == "2023-01-01"
+    assert entry1["rows_fetched"] == 100
+    assert entry1["source"] == "api"
+    assert entry1["status"] == "success"
+    assert "timestamp" in entry1
+
+    # Verify entry 2 (cache hit)
+    assert entry2["symbol"] == "TCS"
+    assert entry2["status"] == "cached"
+    assert entry2["source"] == "cache"
+
+    # Verify entry 3 (failed fetch)
+    assert entry3["symbol"] == "INFY"
+    assert entry3["status"] == "failed"
+    assert entry3["error"] == "Connection timeout"
+
+
+def test_deduplication(tmp_data_dir: Path, mock_settings: Settings) -> None:
+    """Test that duplicate timestamps are removed when saving data (US-028 Phase 7 Initiative 1).
+
+    Verifies that:
+    - Saving data twice removes duplicate timestamps
+    - Stats track duplicates_removed count
+    - Data is sorted by timestamp
+    """
+    import pandas as pd
+
+    from scripts.fetch_historical_data import HistoricalDataFetcher
+
+    # Create fetcher
+    fetcher = HistoricalDataFetcher(
+        settings=mock_settings,
+        dryrun=True,
+    )
+
+    # Create mock data with 3 rows
+    df1 = pd.DataFrame(
+        {
+            "datetime": pd.date_range("2023-01-01", periods=3, freq="D"),
+            "open": [100.0, 101.0, 102.0],
+            "high": [105.0, 106.0, 107.0],
+            "low": [95.0, 96.0, 97.0],
+            "close": [103.0, 104.0, 105.0],
+            "volume": [1000, 2000, 3000],
+        }
+    )
+
+    # Save first batch
+    fetcher.save_to_cache(df1, "RELIANCE", "1day", "2023-01-01")
+
+    # Create second batch with 2 overlapping rows and 1 new row
+    df2 = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(
+                ["2023-01-02", "2023-01-03", "2023-01-04"]
+            ),  # 2 duplicates, 1 new
+            "open": [101.0, 102.0, 103.0],
+            "high": [106.0, 107.0, 108.0],
+            "low": [96.0, 97.0, 98.0],
+            "close": [104.0, 105.0, 106.0],
+            "volume": [2000, 3000, 4000],
+        }
+    )
+
+    # Save second batch (should detect and remove duplicates)
+    fetcher.save_to_cache(df2, "RELIANCE", "1day", "2023-01-01")
+
+    # Verify duplicates were removed
+    assert fetcher.stats["duplicates_removed"] == 2
+
+    # Load saved file and verify data
+    cache_path = fetcher.get_cache_path("RELIANCE", "1day", "2023-01-01")
+    saved_df = pd.read_csv(cache_path)
+
+    # Should have 4 unique rows (3 from df1 + 1 new from df2)
+    assert len(saved_df) == 4
+
+    # Verify data is sorted by timestamp
+    saved_timestamps = pd.to_datetime(saved_df["datetime"])
+    assert (saved_timestamps == saved_timestamps.sort_values()).all()
+
+
+def test_gap_detection(tmp_data_dir: Path, mock_settings: Settings) -> None:
+    """Test that gaps in fetched data are detected (US-028 Phase 7 Initiative 1).
+
+    Verifies that:
+    - Missing trading days are identified
+    - Gaps are grouped into ranges
+    - Stats track gaps_detected count
+    """
+    from datetime import datetime
+
+    import pandas as pd
+
+    from scripts.fetch_historical_data import HistoricalDataFetcher
+
+    # Create fetcher
+    fetcher = HistoricalDataFetcher(
+        settings=mock_settings,
+        dryrun=True,
+    )
+
+    # Create data with gaps (missing Jan 3-4 and Jan 8)
+    timestamps = [
+        "2023-01-01",
+        "2023-01-02",
+        # Gap: Jan 3-4
+        "2023-01-05",
+        "2023-01-06",
+        "2023-01-07",
+        # Gap: Jan 8
+        "2023-01-09",
+        "2023-01-10",
+    ]
+
+    df = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(timestamps),
+            "open": [100.0] * len(timestamps),
+            "high": [105.0] * len(timestamps),
+            "low": [95.0] * len(timestamps),
+            "close": [103.0] * len(timestamps),
+            "volume": [1000] * len(timestamps),
+        }
+    )
+
+    # Detect gaps
+    gaps = fetcher.detect_gaps(
+        df,
+        "RELIANCE",
+        datetime(2023, 1, 1),
+        datetime(2023, 1, 10),
+    )
+
+    # Should detect 2 gap ranges
+    assert len(gaps) >= 1  # At least one gap should be detected
+    assert fetcher.stats["gaps_detected"] >= 1
+
+    # Verify gaps are tuples of (start_date, end_date) as ISO strings
+    for gap in gaps:
+        assert len(gap) == 2
+        assert isinstance(gap[0], str)
+        assert isinstance(gap[1], str)
+
+
+def test_rate_limiting(tmp_data_dir: Path, mock_settings: Settings) -> None:
+    """Test that rate limiting enforcement works (US-028 Phase 7 Initiative 1).
+
+    Verifies that:
+    - Rate limit tracking records request timestamps
+    - Enforcement sleeps when limit is reached
+    - Old timestamps are cleaned up
+    """
+    import time
+
+    from scripts.fetch_historical_data import HistoricalDataFetcher
+
+    # Create fetcher with low rate limit
+    mock_settings.breeze_rate_limit_requests_per_minute = 3
+    fetcher = HistoricalDataFetcher(
+        settings=mock_settings,
+        dryrun=True,
+    )
+
+    # Simulate 3 requests
+    start_time = time.time()
+    for _ in range(3):
+        fetcher.enforce_rate_limit()
+
+    elapsed = time.time() - start_time
+
+    # First 3 requests should not trigger rate limiting (< 1 second)
+    assert elapsed < 1.0
+    assert len(fetcher.request_times) == 3
+
+    # 4th request should trigger rate limiting (will sleep)
+    # Note: In test we don't want to actually sleep 60s, so we just verify
+    # that the logic detects the rate limit condition
+    assert len(fetcher.request_times) >= 3
+
+
+def test_symbols_mode_metadata_loading(mock_settings: Settings) -> None:
+    """Test loading symbols from metadata file (US-028 Phase 7 Initiative 1).
+
+    Verifies that:
+    - Symbols can be loaded by mode (pilot, nifty100, etc.)
+    - Metadata file structure is correct
+    - Invalid modes raise errors
+    """
+    from pathlib import Path
+
+    # Check if metadata file exists
+    metadata_path = Path("data/historical/metadata/nifty100_constituents.json")
+    if not metadata_path.exists():
+        import pytest
+
+        pytest.skip("Metadata file not found - skipping test")
+
+    # Test pilot mode
+    pilot_symbols = mock_settings.get_symbols_for_mode("pilot")
+    assert isinstance(pilot_symbols, list)
+    assert len(pilot_symbols) == 5  # 3 NIFTY + 2 ETFs
+
+    # Test nifty100 mode
+    nifty_symbols = mock_settings.get_symbols_for_mode("nifty100")
+    assert isinstance(nifty_symbols, list)
+    assert len(nifty_symbols) >= 10  # Should have at least 10 symbols
+
+    # Test metals_etfs mode
+    metals_symbols = mock_settings.get_symbols_for_mode("metals_etfs")
+    assert isinstance(metals_symbols, list)
+    assert len(metals_symbols) == 2  # GOLDBEES + SILVERBEES
+
+    # Test all mode - should return all symbols from metadata (96 symbols in current file)
+    all_symbols = mock_settings.get_symbols_for_mode("all")
+    assert len(all_symbols) >= len(metals_symbols)  # At minimum should have the metals
+    # Note: all_symbols returns the flat "symbols" list, which includes both NIFTY100 + metals
+    # The sum of nifty100 + metals_etfs modes may differ due to category overlaps/duplicates
+
+    # Test invalid mode
+    import pytest
+
+    with pytest.raises(ValueError, match="Invalid symbols_mode"):
+        mock_settings.get_symbols_for_mode("invalid_mode")

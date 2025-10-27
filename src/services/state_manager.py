@@ -1392,3 +1392,70 @@ class StateManager:
             health_stats[stream_type] = self.get_streaming_health(stream_type)
 
         return health_stats
+
+    def record_training_progress(
+        self,
+        phase: str,
+        completed: int,
+        total: int,
+        eta_minutes: float | None = None,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        """Record training progress for a pipeline phase (US-028 Phase 7 Initiative 4).
+
+        Args:
+            phase: Phase name (e.g., "data_ingestion", "teacher_training", "student_training")
+            completed: Number of completed items
+            total: Total number of items
+            eta_minutes: Estimated time to completion in minutes (optional)
+            extra: Additional metadata (status, error counts, etc.)
+        """
+        if "training_progress" not in self.state:
+            self.state["training_progress"] = {}
+
+        progress_entry = {
+            "phase": phase,
+            "completed": completed,
+            "total": total,
+            "percent_complete": (completed / total * 100.0) if total > 0 else 0.0,
+            "eta_minutes": eta_minutes,
+            "timestamp": datetime.now().isoformat(),
+        }
+
+        # Merge extra metadata
+        if extra:
+            progress_entry.update(extra)
+
+        self.state["training_progress"][phase] = progress_entry
+        self._save_state()
+
+        logger.debug(
+            f"[Progress] {phase}: {completed}/{total} ({progress_entry['percent_complete']:.1f}%)",
+            extra={"component": "state_manager", "progress": True},
+        )
+
+    def get_training_progress(self, phase: str | None = None) -> dict[str, Any]:
+        """Get training progress for a specific phase or all phases (US-028 Phase 7 Initiative 4).
+
+        Args:
+            phase: Phase name to query (if None, returns all phases)
+
+        Returns:
+            Progress dict for the phase, or dict of all phases
+        """
+        progress = self.state.get("training_progress", {})
+
+        if phase:
+            return progress.get(phase, {})
+
+        return progress
+
+    def clear_training_progress(self) -> None:
+        """Clear all training progress state (US-028 Phase 7 Initiative 4).
+
+        Useful for starting a new training run with clean state.
+        """
+        if "training_progress" in self.state:
+            del self.state["training_progress"]
+            self._save_state()
+            logger.debug("Cleared training progress state")

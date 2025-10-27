@@ -43,6 +43,7 @@ from loguru import logger
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.app.config import Settings
 from src.services.state_manager import StateManager
 
 
@@ -56,6 +57,7 @@ class HistoricalRunOrchestrator:
         end_date: str,
         skip_fetch: bool = False,
         dryrun: bool = False,
+        run_stress_tests: bool | None = None,
     ):
         """Initialize orchestrator.
 
@@ -65,12 +67,20 @@ class HistoricalRunOrchestrator:
             end_date: End date (YYYY-MM-DD)
             skip_fetch: Skip data fetch phase
             dryrun: Dryrun mode (skip heavy computation)
+            run_stress_tests: Enable Phase 8 stress tests (overrides config if provided)
         """
         self.symbols = symbols
         self.start_date = start_date
         self.end_date = end_date
         self.skip_fetch = skip_fetch
         self.dryrun = dryrun
+
+        # Load settings
+        self.settings = Settings()  # type: ignore[call-arg]
+
+        # US-028 Phase 7 Initiative 3: Override stress tests setting if CLI flag provided
+        if run_stress_tests is not None:
+            self.settings.stress_tests_enabled = run_stress_tests
 
         # Generate run ID
         self.run_id = f"live_candidate_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -80,6 +90,9 @@ class HistoricalRunOrchestrator:
         self.repo_root = Path(__file__).parent.parent
         self.model_dir = self.repo_root / "data" / "models" / self.run_id
         self.audit_dir = self.repo_root / "release" / f"audit_{self.run_id}"
+
+        # US-028 Phase 6s: Track actual batch directory from training scripts
+        self.batch_dir: Path | None = None
 
         # Create directories
         self.model_dir.mkdir(parents=True, exist_ok=True)
@@ -138,6 +151,14 @@ class HistoricalRunOrchestrator:
             # Phase 7: Promotion Briefing
             if not self._run_phase_7_promotion_briefing():
                 return False
+
+            # Phase 8: Black-Swan Stress Tests (optional)
+            if self.settings.stress_tests_enabled:
+                if not self._run_phase_8_stress_tests():
+                    return False
+            else:
+                logger.info("Phase 8: Stress Tests (skipped - not enabled)")
+                self.results["phases"]["stress_tests"] = {"status": "skipped", "reason": "not enabled"}
 
             # Validate artifacts exist
             if not self._validate_artifacts():
@@ -275,6 +296,20 @@ class HistoricalRunOrchestrator:
             )
             logger.info("    ✓ Fetched sentiment data")
 
+            # US-028 Phase 7 Initiative 4: Record progress
+            self.state_mgr.record_training_progress(
+                phase="data_ingestion",
+                completed=len(self.symbols),
+                total=len(self.symbols),
+                extra={
+                    "status": "success",
+                    "chunks_fetched": chunk_stats["chunks_fetched"],
+                    "chunks_failed": chunk_stats["chunks_failed"],
+                    "total_rows": chunk_stats["total_rows"],
+                },
+            )
+            logger.info(f"  [Progress] Phase 1 complete: {len(self.symbols)}/{len(self.symbols)} symbols fetched")
+
             self.results["phases"]["data_ingestion"] = {
                 "status": "success",
                 "symbols": len(self.symbols),
@@ -298,6 +333,149 @@ class HistoricalRunOrchestrator:
             logger.error(f"  ✗ Data ingestion failed: {e}")
             self.results["phases"]["data_ingestion"] = {"status": "failed", "error": str(e)}
             return False
+
+    def _aggregate_teacher_runs_from_json(
+        self, batch_dir: Path
+    ) -> dict[str, Any] | None:
+        """Aggregate teacher training statistics from teacher_runs.json.
+
+        US-028 Phase 6l: Robust JSON-based parsing instead of fragile stdout parsing.
+        This eliminates the parsing bug that caused "Trained 0 windows" reports.
+
+        Args:
+            batch_dir: Path to batch directory containing teacher_runs.json
+
+        Returns:
+            Dict with aggregated statistics including window details, or None if parsing fails
+        """
+        import json
+
+        json_path = batch_dir / "teacher_runs.json"
+        if not json_path.exists():
+            logger.warning(f"teacher_runs.json not found at {json_path}")
+            return None
+
+        stats: dict[str, Any] = {
+            "total_windows": 0,
+            "completed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "success_windows": [],
+            "skipped_windows": [],
+            "failed_windows": [],
+            "total_train_samples": 0,
+            "total_val_samples": 0,
+            "batch_dir": str(batch_dir),
+        }
+
+        try:
+            with open(json_path) as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    entry = json.loads(line)
+                    stats["total_windows"] += 1
+
+                    status = entry.get("status", "unknown")
+                    window_label = entry.get("window_label", "unknown")
+
+                    if status == "success":
+                        stats["completed"] += 1
+                        sample_counts = entry.get("sample_counts", {})
+                        stats["total_train_samples"] += sample_counts.get("train_samples", 0)
+                        stats["total_val_samples"] += sample_counts.get("val_samples", 0)
+                        stats["success_windows"].append(
+                            {
+                                "window_label": window_label,
+                                "sample_counts": sample_counts,
+                                "metrics": entry.get("metrics", {}),
+                            }
+                        )
+                    elif status == "skipped":
+                        stats["skipped"] += 1
+                        stats["skipped_windows"].append(
+                            {
+                                "window_label": window_label,
+                                "reason": entry.get("reason", "Unknown"),
+                                "sample_counts": entry.get("sample_counts"),
+                            }
+                        )
+                    elif status == "failed":
+                        stats["failed"] += 1
+                        stats["failed_windows"].append(
+                            {
+                                "window_label": window_label,
+                                "error": entry.get("error", "Unknown error"),
+                            }
+                        )
+
+            logger.info(
+                f"    ✓ Aggregated stats from teacher_runs.json: "
+                f"{stats['total_windows']} windows total"
+            )
+            return stats
+
+        except Exception as e:
+            logger.error(f"Failed to parse {json_path}: {e}")
+            return None
+
+    def _extract_reward_metrics_from_student_runs(self) -> dict[str, float] | None:
+        """Extract and aggregate reward metrics from student_runs.json.
+
+        US-028 Phase 7 Initiative 2: Parse student_runs.json and aggregate reward metrics
+        across all student runs where reward loop was enabled.
+
+        Returns:
+            Dict with aggregated reward metrics or None if no reward data found
+        """
+        import json
+
+        json_path = self.batch_dir / "student_runs.json"
+        if not json_path.exists():
+            logger.debug(f"student_runs.json not found at {json_path}")
+            return None
+
+        reward_entries = []
+
+        try:
+            with open(json_path) as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    entry = json.loads(line)
+
+                    # Only process entries where reward loop was enabled
+                    if not entry.get("reward_loop_enabled", False):
+                        continue
+
+                    reward_metrics = entry.get("reward_metrics")
+                    if reward_metrics:
+                        reward_entries.append(reward_metrics)
+
+            if not reward_entries:
+                logger.debug("No reward metrics found in student_runs.json")
+                return None
+
+            # Aggregate metrics across all student runs
+            aggregated = {
+                "mean_reward": sum(e.get("mean_reward", 0.0) for e in reward_entries) / len(reward_entries),
+                "cumulative_reward": sum(e.get("cumulative_reward", 0.0) for e in reward_entries),
+                "reward_volatility": sum(e.get("reward_volatility", 0.0) for e in reward_entries) / len(reward_entries),
+                "positive_rewards": sum(e.get("positive_rewards", 0) for e in reward_entries),
+                "negative_rewards": sum(e.get("negative_rewards", 0) for e in reward_entries),
+                "num_rewards": sum(e.get("num_rewards", 0) for e in reward_entries),
+                "num_student_runs": len(reward_entries),
+            }
+
+            logger.info(
+                f"    ✓ Extracted reward metrics from {len(reward_entries)} student run(s): "
+                f"mean={aggregated['mean_reward']:.4f}, positive={aggregated['positive_rewards']}"
+            )
+            return aggregated
+
+        except Exception as e:
+            logger.error(f"Failed to parse {json_path}: {e}")
+            return None
 
     def _run_phase_2_teacher_training(self) -> bool:
         """Phase 2: Teacher Training."""
@@ -337,23 +515,62 @@ class HistoricalRunOrchestrator:
                 check=True,
             )
 
-            # Parse summary statistics from output
-            stats = {
-                "completed": 0,
-                "failed": 0,
-                "skipped": 0,
-                "total_windows": 0,
-            }
+            # US-028 Phase 6l: Extract batch directory from stdout or stderr
+            # (loguru logs go to stderr by default)
+            batch_dir = None
+            for output in [result.stdout, result.stderr]:
+                if not output:
+                    continue
+                for line in output.split("\n"):
+                    if "Batch directory:" in line:
+                        # Split on "Batch directory:" marker to handle log timestamps with colons
+                        batch_dir_str = line.split("Batch directory:", 1)[1].strip()
+                        batch_dir = Path(batch_dir_str)
+                        logger.debug(f"Extracted batch directory from output: {batch_dir}")
+                        break
+                if batch_dir:
+                    break
 
-            for line in result.stdout.split("\n"):
-                if "Total windows:" in line:
-                    stats["total_windows"] = int(line.split(":")[1].strip())
-                elif "Completed:" in line:
-                    stats["completed"] = int(line.split(":")[1].strip())
-                elif "Failed:" in line:
-                    stats["failed"] = int(line.split(":")[1].strip())
-                elif "Skipped:" in line:
-                    stats["skipped"] = int(line.split(":")[1].strip())
+            if not batch_dir:
+                logger.warning("Could not extract batch directory from teacher batch output")
+            else:
+                # US-028 Phase 6s: Store batch directory for artifact validation
+                self.batch_dir = batch_dir
+
+            # US-028 Phase 6l: Primary - Aggregate stats from teacher_runs.json
+            stats = None
+            if batch_dir and batch_dir.exists():
+                stats = self._aggregate_teacher_runs_from_json(batch_dir)
+            elif batch_dir and not batch_dir.exists():
+                logger.warning(f"Batch directory does not exist: {batch_dir}")
+
+            # US-028 Phase 6l: Fallback - Parse stdout if JSON aggregation failed
+            if stats is None:
+                logger.warning(
+                    "Failed to aggregate from teacher_runs.json, falling back to stdout parsing"
+                )
+                stats = {
+                    "completed": 0,
+                    "failed": 0,
+                    "skipped": 0,
+                    "total_windows": 0,
+                    "success_windows": [],
+                    "skipped_windows": [],
+                    "failed_windows": [],
+                    "batch_dir": str(batch_dir) if batch_dir else None,
+                    "total_train_samples": 0,
+                    "total_val_samples": 0,
+                }
+
+                for line in result.stdout.split("\n"):
+                    if "Total windows:" in line:
+                        stats["total_windows"] = int(line.split(":")[1].strip())
+                    elif "Completed:" in line:
+                        stats["completed"] = int(line.split(":")[1].strip())
+                    elif "Failed:" in line:
+                        stats["failed"] = int(line.split(":")[1].strip())
+                    elif "Skipped:" in line:
+                        stats["skipped"] = int(line.split(":")[1].strip())
 
             logger.info(
                 f"    ✓ Trained {stats['completed']} windows, "
@@ -363,12 +580,35 @@ class HistoricalRunOrchestrator:
             logger.info("  ✓ Teacher training complete")
             logger.info("  ✓ Recorded teacher_runs.json")
 
+            # US-028 Phase 7 Initiative 4: Record progress
+            self.state_mgr.record_training_progress(
+                phase="teacher_training",
+                completed=stats["completed"],
+                total=stats["total_windows"],
+                extra={
+                    "status": "success" if stats["failed"] == 0 else "partial",
+                    "trained": stats["completed"],
+                    "skipped": stats["skipped"],
+                    "failed": stats["failed"],
+                },
+            )
+            logger.info(
+                f"  [Progress] Phase 2 complete: {stats['completed']}/{stats['total_windows']} windows, "
+                f"trained={stats['completed']}, skipped={stats['skipped']}, failed={stats['failed']}"
+            )
+
             self.results["phases"]["teacher_training"] = {
                 "status": "success" if stats["failed"] == 0 else "partial",
                 "total_windows": stats["total_windows"],
                 "models_trained": stats["completed"],
                 "skipped": stats["skipped"],
                 "failed": stats["failed"],
+                "success_windows": stats.get("success_windows", []),
+                "skipped_windows": stats.get("skipped_windows", []),
+                "failed_windows": stats.get("failed_windows", []),
+                "batch_dir": stats.get("batch_dir"),
+                "total_train_samples": stats.get("total_train_samples", 0),
+                "total_val_samples": stats.get("total_val_samples", 0),
                 "exit_code": 0,
             }
             return True
@@ -415,10 +655,37 @@ class HistoricalRunOrchestrator:
             logger.info("  ✓ Student training complete")
             logger.info("  ✓ Recorded student_runs.json")
 
+            # US-028 Phase 7 Initiative 2: Extract reward metrics from student_runs.json
+            reward_metrics_summary = self._extract_reward_metrics_from_student_runs()
+
+            # US-028 Phase 7 Initiative 4: Record progress with reward metrics
+            # Note: Student training completes all batches in one run
+            progress_extra = {
+                "status": "success",
+                "samples": 25000,
+            }
+
+            # Add reward metrics if available
+            if reward_metrics_summary:
+                progress_extra.update(reward_metrics_summary)
+                logger.info(
+                    f"  [Progress] Reward metrics: mean={reward_metrics_summary.get('mean_reward', 0):.4f}, "
+                    f"positive={reward_metrics_summary.get('positive_rewards', 0)}"
+                )
+
+            self.state_mgr.record_training_progress(
+                phase="student_training",
+                completed=1,
+                total=1,
+                extra=progress_extra,
+            )
+            logger.info("  [Progress] Phase 3 complete: student models trained")
+
             self.results["phases"]["student_training"] = {
                 "status": "success",
                 "samples": 25000,
                 "exit_code": 0,
+                "reward_metrics": reward_metrics_summary,
             }
             return True
 
@@ -459,7 +726,7 @@ class HistoricalRunOrchestrator:
             ]
 
             logger.info(f"    Running: {' '.join(validation_cmd)}")
-            subprocess.run(
+            result = subprocess.run(
                 validation_cmd,
                 capture_output=True,
                 text=True,
@@ -467,12 +734,31 @@ class HistoricalRunOrchestrator:
             )
             logger.info("    ✓ Validation completed")
 
+            # US-028 Phase 6v: Extract validation_run_id from output
+            # Look for "MODEL VALIDATION RUN: validation_YYYYMMDD_HHMMSS"
+            validation_run_id = None
+            for output in [result.stdout, result.stderr]:
+                if not output:
+                    continue
+                for line in output.split("\n"):
+                    if "MODEL VALIDATION RUN:" in line:
+                        # Extract run_id after "MODEL VALIDATION RUN:"
+                        validation_run_id = line.split("MODEL VALIDATION RUN:", 1)[1].strip()
+                        logger.debug(f"Extracted validation_run_id: {validation_run_id}")
+                        break
+                if validation_run_id:
+                    break
+
+            if not validation_run_id:
+                logger.warning("Could not extract validation_run_id from output")
+
             logger.info("  ✓ Validation passed")
             logger.info("  ✓ Generated reports")
 
             self.results["phases"]["model_validation"] = {
                 "status": "success",
                 "validation_passed": True,
+                "validation_run_id": validation_run_id,
                 "exit_code": 0,
             }
             return True
@@ -483,7 +769,12 @@ class HistoricalRunOrchestrator:
             return False
 
     def _run_phase_5_statistical_tests(self) -> bool:
-        """Phase 5: Statistical Tests."""
+        """Phase 5: Statistical Tests.
+
+        US-028 Phase 6v: Promoted out of dryrun mode. Now consumes validation_run_id
+        from Phase 4 and runs real statistical validation (walk-forward CV, bootstrap,
+        hypothesis tests, Sharpe comparison, benchmark comparison).
+        """
         logger.info("Phase 5/7: Statistical Tests")
 
         if self.dryrun:
@@ -499,39 +790,57 @@ class HistoricalRunOrchestrator:
         try:
             logger.info("  → Running statistical validation...")
 
-            # Execute: run_statistical_tests.py
-            # Note: Requires validation run_id from Phase 4
-            # For now, we derive the run_id from the current timestamp
-            # In a production system, Phase 4 should output the run_id for Phase 5 to consume
-            from datetime import datetime
+            # US-028 Phase 6v: Get validation_run_id from Phase 4
+            validation_run_id = self.results.get("phases", {}).get("model_validation", {}).get("validation_run_id")
 
-            validation_run_id = f"validation_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+            if not validation_run_id:
+                logger.error("validation_run_id not available from Phase 4")
+                self.results["phases"]["statistical_tests"] = {
+                    "status": "failed",
+                    "error": "validation_run_id not available from Phase 4"
+                }
+                return False
 
+            logger.info(f"  Using validation_run_id from Phase 4: {validation_run_id}")
+
+            # US-028 Phase 6v: Removed --dryrun flag
             stat_test_cmd = [
                 "python",
                 str(self.repo_root / "scripts" / "run_statistical_tests.py"),
                 "--run-id",
                 validation_run_id,
-                "--dryrun",  # Use dryrun for now as this needs proper validation run_id
             ]
 
             logger.info(f"    Running: {' '.join(stat_test_cmd)}")
-            subprocess.run(
+            result = subprocess.run(
                 stat_test_cmd,
                 capture_output=True,
                 text=True,
-                check=True,
+                check=False,  # Don't raise immediately, we'll handle exit codes
             )
-            logger.info("    ✓ Statistical tests completed (dryrun mode)")
+
+            # Check exit code
+            if result.returncode != 0:
+                logger.error(f"    ✗ Statistical tests failed with exit code {result.returncode}")
+                if result.stderr:
+                    logger.error(f"    Error output: {result.stderr[:500]}")
+                self.results["phases"]["statistical_tests"] = {
+                    "status": "failed",
+                    "exit_code": result.returncode,
+                    "error": result.stderr[:500] if result.stderr else "Unknown error",
+                }
+                return False
+
+            logger.info("    ✓ Statistical tests completed")
 
             logger.info("  ✓ All tests passed")
             logger.info("  ✓ Stored stat_tests.json")
 
             self.results["phases"]["statistical_tests"] = {
                 "status": "success",
+                "validation_run_id": validation_run_id,
                 "tests_passed": True,
                 "exit_code": 0,
-                "note": "Using dryrun mode - needs validation run_id integration",
             }
             return True
 
@@ -564,22 +873,53 @@ class HistoricalRunOrchestrator:
             ]
 
             logger.info(f"    Running: {' '.join(audit_cmd)}")
-            subprocess.run(
+            # US-028 Phase 6r: Tolerate exit code 1 (warnings) for historical training
+            result = subprocess.run(
                 audit_cmd,
                 capture_output=True,
                 text=True,
-                check=True,
+                check=False,  # Don't raise on non-zero exit codes
             )
-            logger.info("    ✓ Audit completed")
+
+            # Exit code 0: Success
+            # Exit code 1: Success with deployment warnings (expected for historical training)
+            # Exit code 2+: Actual failure
+            if result.returncode == 0:
+                logger.info("    ✓ Audit completed successfully")
+                self.results["phases"]["release_audit"] = {
+                    "status": "success",
+                    "manifest": str(self.audit_dir / "manifest.yaml"),
+                    "exit_code": 0,
+                    "audit_dir": str(self.audit_dir),
+                }
+            elif result.returncode == 1:
+                logger.warning(
+                    "    ⚠ Audit completed with deployment warnings (expected for historical training)"
+                )
+                logger.warning("      → Optimizer runs and deployed models not required for historical training")
+                self.results["phases"]["release_audit"] = {
+                    "status": "success_with_warnings",
+                    "manifest": str(self.audit_dir / "manifest.yaml"),
+                    "exit_code": 1,
+                    "warnings": "Deployment readiness checks failed (expected for historical training context)",
+                    "audit_dir": str(self.audit_dir),
+                    "stdout": result.stdout[-500:] if result.stdout else None,  # Last 500 chars
+                    "stderr": result.stderr[-500:] if result.stderr else None,
+                }
+            else:
+                logger.error(f"  ✗ Release audit failed with exit code {result.returncode}")
+                if result.stderr:
+                    logger.error(f"    Error output: {result.stderr[:500]}")
+                self.results["phases"]["release_audit"] = {
+                    "status": "failed",
+                    "exit_code": result.returncode,
+                    "error": result.stderr[:500] if result.stderr else "Unknown error",
+                    "stdout": result.stdout[-500:] if result.stdout else None,
+                }
+                return False
 
             logger.info("  ✓ Audit bundle created")
             logger.info("  ✓ Manifest generated")
-
-            self.results["phases"]["release_audit"] = {
-                "status": "success",
-                "manifest": str(self.audit_dir / "manifest.yaml"),
-                "exit_code": 0,
-            }
             return True
 
         except Exception as e:
@@ -589,7 +929,8 @@ class HistoricalRunOrchestrator:
 
     def _run_phase_7_promotion_briefing(self) -> bool:
         """Phase 7: Promotion Briefing."""
-        logger.info("Phase 7/7: Promotion Briefing")
+        phase_num = "7/8" if self.settings.stress_tests_enabled else "7/7"
+        logger.info(f"Phase {phase_num}: Promotion Briefing")
 
         try:
             logger.info("  → Generating briefing...")
@@ -610,26 +951,159 @@ class HistoricalRunOrchestrator:
             self.results["phases"]["promotion_briefing"] = {"status": "failed", "error": str(e)}
             return False
 
+    def _run_phase_8_stress_tests(self) -> bool:
+        """Phase 8: Black-Swan Stress Tests (US-028 Phase 7 Initiative 3).
+
+        Run stress tests against historical crisis periods to assess model resilience.
+        """
+        logger.info("Phase 8/8: Black-Swan Stress Tests")
+
+        if self.dryrun:
+            logger.info("  ⚠ Skipping stress tests (dryrun mode)")
+            self.results["phases"]["stress_tests"] = {"status": "skipped", "reason": "dryrun"}
+            return True
+
+        if not self.batch_dir:
+            logger.error("  ✗ Batch directory not available for stress tests")
+            self.results["phases"]["stress_tests"] = {
+                "status": "failed",
+                "error": "Batch directory not set",
+            }
+            return False
+
+        # Extract batch_id from batch_dir path
+        batch_id = self.batch_dir.name
+
+        try:
+            logger.info("  → Running stress tests...")
+
+            # Prepare stress test command
+            stress_cmd = [
+                "python",
+                str(self.repo_root / "scripts" / "run_stress_tests.py"),
+                "--batch-id",
+                batch_id,
+            ]
+
+            # Add severity filter or specific periods
+            if self.settings.stress_test_specific_periods:
+                stress_cmd.extend(["--periods", *self.settings.stress_test_specific_periods])
+            else:
+                stress_cmd.extend(["--severity", *self.settings.stress_test_severity_filter])
+
+            # Add output directory
+            stress_output_dir = Path("release") / f"stress_tests_{batch_id}"
+            stress_cmd.extend(["--output-dir", str(stress_output_dir)])
+
+            logger.info(f"    Running: {' '.join(stress_cmd)}")
+            subprocess.run(
+                stress_cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+
+            logger.info("  ✓ Stress tests complete")
+
+            # Parse summary for stats
+            summary_file = stress_output_dir / "stress_summary.json"
+            stress_stats = {"summary_path": str(summary_file)}
+
+            if summary_file.exists():
+                with open(summary_file) as f:
+                    summary = json.load(f)
+                    stress_stats.update(
+                        {
+                            "total_tests": summary.get("total_tests", 0),
+                            "successful": summary.get("successful", 0),
+                            "failed": summary.get("failed", 0),
+                            "skipped": summary.get("skipped", 0),
+                            "periods_tested": summary.get("periods_tested", []),
+                        }
+                    )
+                logger.info(
+                    f"    ✓ {stress_stats['successful']}/{stress_stats['total_tests']} tests passed"
+                )
+                if stress_stats["failed"] > 0:
+                    logger.warning(f"    ⚠ {stress_stats['failed']} tests failed")
+
+            # US-028 Phase 7 Initiative 4: Record progress
+            self.state_mgr.record_training_progress(
+                phase="stress_tests",
+                completed=stress_stats.get("successful", 0),
+                total=stress_stats.get("total_tests", 0),
+                extra={
+                    "status": "success",
+                    "summary_path": str(summary_file),
+                    "periods_tested": stress_stats.get("periods_tested", []),
+                },
+            )
+            logger.info(
+                f"  [Progress] Phase 8 complete: {stress_stats.get('successful', 0)}/{stress_stats.get('total_tests', 0)} stress tests passed"
+            )
+
+            self.results["phases"]["stress_tests"] = {
+                "status": "success",
+                "exit_code": 0,
+                **stress_stats,
+            }
+            return True
+
+        except subprocess.CalledProcessError as e:
+            logger.error(f"  ✗ Stress tests failed: {e}")
+            logger.error(f"  stdout: {e.stdout}")
+            logger.error(f"  stderr: {e.stderr}")
+            self.results["phases"]["stress_tests"] = {
+                "status": "failed",
+                "error": str(e),
+                "exit_code": e.returncode,
+            }
+            return False
+        except Exception as e:
+            logger.error(f"  ✗ Stress tests failed: {e}")
+            self.results["phases"]["stress_tests"] = {
+                "status": "failed",
+                "error": str(e),
+            }
+            return False
+
     def _validate_artifacts(self) -> bool:
-        """Validate that all required artifacts exist after training."""
+        """Validate that all required artifacts exist after training.
+
+        US-028 Phase 6s: Artifacts are located in the batch directory
+        (e.g., data/models/20251014_224123/) not the run_id directory
+        (e.g., data/models/live_candidate_20251014_224944/).
+        """
         logger.info("Validating artifacts...")
 
         if self.dryrun:
             logger.info("  [DRYRUN] Skipping artifact validation")
             return True
 
+        # US-028 Phase 6s: Use actual batch directory from training
+        if not self.batch_dir:
+            logger.error("  ✗ Batch directory not available for validation")
+            self.results["artifact_validation"] = {
+                "status": "failed",
+                "error": "Batch directory not set (Phase 2 may have failed)",
+            }
+            return False
+
+        # US-028 Phase 6s: Look for artifacts in batch directory
         required_artifacts = [
-            (self.model_dir / "teacher_models" / "teacher_runs.json", "teacher_runs.json"),
-            (self.model_dir / "student_runs.json", "student_runs.json"),
+            (self.batch_dir / "teacher_runs.json", "teacher_runs.json"),
+            (self.batch_dir / "student_runs.json", "student_runs.json"),
         ]
 
         missing_artifacts = []
+        validated_paths = {}
         for artifact_path, artifact_name in required_artifacts:
             if not artifact_path.exists():
                 missing_artifacts.append(artifact_name)
                 logger.error(f"  ✗ Missing: {artifact_name} (expected at {artifact_path})")
             else:
-                logger.info(f"  ✓ Found: {artifact_name}")
+                logger.info(f"  ✓ Found: {artifact_name} at {artifact_path}")
+                validated_paths[artifact_name] = str(artifact_path)
 
         if missing_artifacts:
             error_msg = f"Missing required artifacts: {', '.join(missing_artifacts)}"
@@ -637,11 +1111,16 @@ class HistoricalRunOrchestrator:
             self.results["artifact_validation"] = {
                 "status": "failed",
                 "missing": missing_artifacts,
+                "batch_dir": str(self.batch_dir),
             }
             return False
 
         logger.info("  ✓ All required artifacts present")
-        self.results["artifact_validation"] = {"status": "success"}
+        self.results["artifact_validation"] = {
+            "status": "success",
+            "batch_dir": str(self.batch_dir),
+            "validated_files": validated_paths,
+        }
         return True
 
     def _generate_promotion_briefing(self) -> None:
@@ -1006,8 +1485,27 @@ def main() -> None:
 
     parser.add_argument(
         "--symbols",
-        required=True,
-        help="Comma-separated list of symbols to train",
+        required=False,
+        help="Comma-separated list of symbols to train (mutually exclusive with --symbols-mode)",
+    )
+
+    parser.add_argument(
+        "--symbols-mode",
+        required=False,
+        choices=["pilot", "nifty100", "metals_etfs", "all"],
+        help="Symbol mode to load from metadata (US-028 Phase 7 Initiative 1)",
+    )
+
+    parser.add_argument(
+        "--max-symbols",
+        type=int,
+        help="Limit number of symbols from --symbols-mode (US-028 Phase 7 CLI Hardening)",
+    )
+
+    parser.add_argument(
+        "--symbols-file",
+        type=str,
+        help="Path to text file with one symbol per line (US-028 Phase 7 CLI Hardening)",
     )
 
     parser.add_argument(
@@ -1034,10 +1532,52 @@ def main() -> None:
         help="Dryrun mode (skip heavy computation)",
     )
 
+    parser.add_argument(
+        "--run-stress-tests",
+        action="store_true",
+        help="Enable Phase 8 stress tests against historical crisis periods (US-028 Phase 7 Initiative 3)",
+    )
+
     args = parser.parse_args()
 
-    # Parse symbols
-    symbols = [s.strip() for s in args.symbols.split(",")]
+    # US-028 Phase 7 Initiative 1: Support --symbols-mode
+    # US-028 Phase 7 CLI Hardening: Support --symbols-file and --max-symbols
+    # Parse symbols from --symbols, --symbols-mode, or --symbols-file (mutually exclusive)
+    if sum([bool(args.symbols), bool(args.symbols_mode), bool(args.symbols_file)]) > 1:
+        parser.error("Cannot specify more than one of --symbols, --symbols-mode, or --symbols-file")
+
+    if args.symbols_file:
+        # Load symbols from file (one symbol per line)
+        symbols_file_path = Path(args.symbols_file)
+        if not symbols_file_path.exists():
+            logger.error(f"Symbols file not found: {symbols_file_path}")
+            sys.exit(1)
+
+        try:
+            with open(symbols_file_path) as f:
+                symbols = [line.strip() for line in f if line.strip() and not line.strip().startswith("#")]
+            logger.info(f"Loaded {len(symbols)} symbols from {symbols_file_path}")
+        except Exception as e:
+            logger.error(f"Failed to read symbols file {symbols_file_path}: {e}")
+            sys.exit(1)
+    elif args.symbols_mode:
+        # Load symbols from metadata
+        from src.app.config import Settings
+
+        settings = Settings()  # type: ignore[call-arg]
+        symbols = settings.get_symbols_for_mode(args.symbols_mode)
+        logger.info(f"Loaded {len(symbols)} symbols from mode '{args.symbols_mode}'")
+    elif args.symbols:
+        symbols = [s.strip() for s in args.symbols.split(",")]
+    else:
+        parser.error("Must specify either --symbols, --symbols-mode, or --symbols-file")
+
+    # US-028 Phase 7 CLI Hardening: Apply --max-symbols limit
+    if args.max_symbols and args.max_symbols > 0:
+        original_count = len(symbols)
+        symbols = symbols[:args.max_symbols]
+        logger.info(f"Applied --max-symbols limit: {original_count} → {len(symbols)} symbols")
+        logger.info(f"  → Limited to: {', '.join(symbols)}")
 
     # Create orchestrator
     orchestrator = HistoricalRunOrchestrator(
@@ -1046,6 +1586,7 @@ def main() -> None:
         end_date=args.end_date,
         skip_fetch=args.skip_fetch,
         dryrun=args.dryrun,
+        run_stress_tests=args.run_stress_tests,  # US-028 Phase 7 Initiative 3
     )
 
     # Execute pipeline

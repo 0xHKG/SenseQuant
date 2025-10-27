@@ -475,6 +475,11 @@ class Settings(BaseSettings):  # type: ignore[misc]
     # =====================================================================
     # US-024: Historical Data Ingestion Configuration
     # =====================================================================
+    # US-028 Phase 7 Initiative 1: Symbol universe management
+    historical_data_symbols_mode: str | None = Field(
+        default=None,
+        validation_alias="HISTORICAL_DATA_SYMBOLS_MODE",
+    )  # Symbol mode: "nifty100", "metals_etfs", "pilot" (overrides historical_data_symbols)
     historical_data_symbols: list[str] = Field(
         default=["RELIANCE", "TCS", "INFY"],
         validation_alias="HISTORICAL_DATA_SYMBOLS",
@@ -510,6 +515,11 @@ class Settings(BaseSettings):  # type: ignore[misc]
         2.0, validation_alias="BREEZE_RATE_LIMIT_DELAY_SECONDS", ge=0.1, le=10.0
     )  # Delay between chunk requests to respect rate limits
 
+    # US-028 Phase 7 Initiative 1: Symbol batch processing
+    historical_symbol_batch_size: int = Field(
+        10, validation_alias="HISTORICAL_SYMBOL_BATCH_SIZE", ge=1, le=50
+    )  # Process symbols in batches to avoid API spikes (Phase 7 Initiative 1)
+
     # =====================================================================
     # US-024: Batch Training Configuration
     # =====================================================================
@@ -517,11 +527,14 @@ class Settings(BaseSettings):  # type: ignore[misc]
         False, validation_alias="BATCH_TRAINING_ENABLED"
     )  # Enable batch teacher training
     batch_training_window_days: int = Field(
-        90, validation_alias="BATCH_TRAINING_WINDOW_DAYS", ge=7, le=365
-    )  # Training window size in days
+        180, validation_alias="BATCH_TRAINING_WINDOW_DAYS", ge=30, le=365
+    )  # Training window size in days (US-028 Phase 6h: increased from 90 to 180 for sufficient samples after feature warm-up)
     batch_training_forecast_horizon_days: int = Field(
         7, validation_alias="BATCH_TRAINING_FORECAST_HORIZON_DAYS", ge=1, le=30
     )  # Forecast horizon for teacher labels in days
+    batch_training_min_samples: int = Field(
+        20, validation_alias="BATCH_TRAINING_MIN_SAMPLES", ge=10, le=100
+    )  # Minimum labeled samples required for training (US-028 Phase 6h)
     batch_training_output_dir: str = Field(
         "data/models", validation_alias="BATCH_TRAINING_OUTPUT_DIR"
     )  # Directory to store batch training artifacts
@@ -547,6 +560,40 @@ class Settings(BaseSettings):  # type: ignore[misc]
     student_batch_promotion_enabled: bool = Field(
         True, validation_alias="STUDENT_BATCH_PROMOTION_ENABLED"
     )  # Enable automatic promotion checklist generation
+
+    # US-028 Phase 7 Initiative 2: Teacher-Student Reward Loop Configuration
+    reward_loop_enabled: bool = Field(
+        False, validation_alias="REWARD_LOOP_ENABLED"
+    )  # Enable adaptive learning via reward signals (US-028 Phase 7 Initiative 2)
+    reward_horizon_days: int = Field(
+        5, validation_alias="REWARD_HORIZON_DAYS", ge=1, le=30
+    )  # Number of days to look ahead for realized returns
+    reward_clip_min: float = Field(
+        -2.0, validation_alias="REWARD_CLIP_MIN"
+    )  # Minimum reward value (clip negative rewards)
+    reward_clip_max: float = Field(
+        2.0, validation_alias="REWARD_CLIP_MAX"
+    )  # Maximum reward value (clip positive rewards)
+    reward_weighting_mode: str = Field(
+        "linear", validation_alias="REWARD_WEIGHTING_MODE"
+    )  # Sample weighting mode: "linear", "exponential", "none"
+    reward_weighting_scale: float = Field(
+        1.0, validation_alias="REWARD_WEIGHTING_SCALE", ge=0.0, le=10.0
+    )  # Scaling factor for reward-based sample weights
+    reward_ab_testing_enabled: bool = Field(
+        False, validation_alias="REWARD_AB_TESTING_ENABLED"
+    )  # Enable A/B testing (baseline vs reward-weighted training)
+
+    # US-028 Phase 7 Initiative 3: Black-Swan Stress Test Configuration
+    stress_tests_enabled: bool = Field(
+        False, validation_alias="STRESS_TESTS_ENABLED"
+    )  # Enable Phase 8 stress testing against historical crisis periods
+    stress_test_severity_filter: list[str] = Field(
+        ["extreme", "high"], validation_alias="STRESS_TEST_SEVERITY_FILTER"
+    )  # Severity levels to test (extreme, high, medium, low)
+    stress_test_specific_periods: list[str] | None = Field(
+        None, validation_alias="STRESS_TEST_SPECIFIC_PERIODS"
+    )  # Specific period IDs to test (None = use severity filter)
 
     # US-024 Phase 3: Sentiment Snapshot Configuration
     sentiment_snapshot_enabled: bool = Field(
@@ -811,6 +858,132 @@ class Settings(BaseSettings):  # type: ignore[misc]
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore", case_sensitive=False
     )
+
+    def get_symbols_for_mode(self, mode: str | None = None) -> list[str]:
+        """Load symbols from metadata based on symbols_mode (US-028 Phase 7 Initiative 1).
+
+        Args:
+            mode: Symbol mode ("nifty100", "metals_etfs", "pilot", "all")
+                 If None, uses self.historical_data_symbols_mode or falls back to self.historical_data_symbols
+
+        Returns:
+            List of symbols for the specified mode
+
+        Raises:
+            FileNotFoundError: If metadata file doesn't exist
+            ValueError: If mode is invalid
+        """
+        from pathlib import Path
+
+        mode = mode or self.historical_data_symbols_mode
+
+        # If no mode specified, return default symbols
+        if not mode:
+            return self.historical_data_symbols
+
+        # Load metadata file
+        metadata_path = Path("data/historical/metadata/nifty100_constituents.json")
+        if not metadata_path.exists():
+            raise FileNotFoundError(
+                f"Symbol metadata not found: {metadata_path}. "
+                "Run 'python scripts/setup_metadata.py' to create it."
+            )
+
+        with open(metadata_path) as f:
+            metadata = json.load(f)
+
+        symbols_data = metadata.get("symbols", [])
+        categories_data = metadata.get("categories", {})
+
+        # Filter by mode
+        if mode == "all":
+            # Return all symbols
+            return symbols_data if isinstance(symbols_data, list) else []
+        elif mode == "nifty100":
+            # Return all NIFTY 100 symbols (excluding metals ETFs)
+            nifty_symbols = []
+            for category, symbols in categories_data.items():
+                # Exclude metals ETFs categories
+                if "metals_etfs" not in category and "metals" not in category:
+                    if isinstance(symbols, list):
+                        nifty_symbols.extend(symbols)
+            return nifty_symbols
+        elif mode == "metals_etfs":
+            # Return only metals ETFs (GOLDBEES, SILVERBEES)
+            metals_symbols = []
+            for category, symbols in categories_data.items():
+                if "metals_etfs" in category:
+                    if isinstance(symbols, list):
+                        metals_symbols.extend(symbols)
+            return metals_symbols
+        elif mode == "pilot":
+            # Return pilot subset (first 3 large_cap symbols + both metals ETFs)
+            # Look for verified large cap symbols
+            large_cap = []
+            metals = []
+            for category, symbols in categories_data.items():
+                if "large_cap_verified" in category and isinstance(symbols, list):
+                    large_cap = symbols[:3]
+                if "metals_etfs" in category and isinstance(symbols, list):
+                    metals = symbols
+            return large_cap + metals
+        else:
+            raise ValueError(
+                f"Invalid symbols_mode: {mode}. "
+                "Valid modes: 'all', 'nifty100', 'metals_etfs', 'pilot'"
+            )
+
+    def get_stress_periods(
+        self, period_ids: list[str] | None = None, severity_filter: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """Load stress period metadata for black-swan testing (US-028 Phase 7 Initiative 3).
+
+        Args:
+            period_ids: List of specific period IDs to load (e.g., ["covid_crash_2020"])
+                       If None, returns all periods
+            severity_filter: Filter by severity levels (e.g., ["extreme", "high"])
+                           If None, no severity filtering
+
+        Returns:
+            List of stress period dicts with id, name, start_date, end_date, etc.
+
+        Raises:
+            FileNotFoundError: If stress_periods.json doesn't exist
+            ValueError: If requested period_id is not found
+        """
+        from pathlib import Path
+
+        # Load stress periods metadata
+        metadata_path = Path("data/historical/metadata/stress_periods.json")
+        if not metadata_path.exists():
+            raise FileNotFoundError(
+                f"Stress periods metadata not found: {metadata_path}. "
+                "Expected metadata file with historical crisis periods."
+            )
+
+        with open(metadata_path) as f:
+            metadata = json.load(f)
+
+        periods = metadata.get("periods", [])
+
+        # Filter by period IDs if specified
+        if period_ids:
+            filtered = [p for p in periods if p["id"] in period_ids]
+            # Verify all requested IDs were found
+            found_ids = {p["id"] for p in filtered}
+            missing = set(period_ids) - found_ids
+            if missing:
+                raise ValueError(
+                    f"Stress period ID(s) not found: {missing}. "
+                    f"Available IDs: {[p['id'] for p in periods]}"
+                )
+            periods = filtered
+
+        # Filter by severity if specified
+        if severity_filter:
+            periods = [p for p in periods if p.get("severity") in severity_filter]
+
+        return periods
 
 
 settings = Settings()  # type: ignore[call-arg]

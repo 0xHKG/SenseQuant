@@ -661,6 +661,14 @@ def test_dashboard_helpers(tmp_path, monkeypatch):
     - compute_rolling_metrics() comparison of rolling vs all-time
     - detect_metric_degradation() alert triggering
     """
+    # US-028 Phase 6x: Skip test if streamlit not installed
+    try:
+        from dashboards.telemetry_dashboard import STREAMLIT_AVAILABLE
+        if not STREAMLIT_AVAILABLE:
+            pytest.skip("streamlit not installed - skipping dashboard test")
+    except ImportError:
+        pytest.skip("dashboards.telemetry_dashboard not available")
+
     # Import dashboard helpers
     from dashboards.telemetry_dashboard import (
         compute_rolling_metrics,

@@ -109,6 +109,13 @@ def parse_args() -> argparse.Namespace:
         help="Force dry-run mode (mock data) regardless of MODE setting",
     )
 
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Output directory for model artifacts (default: data/models/)",
+    )
+
     return parser.parse_args()
 
 
@@ -155,6 +162,7 @@ def main() -> None:
     logger.info(f"Return Threshold: {args.threshold * 100:.1f}%")
     logger.info(f"Train/Val Split: {args.split * 100:.0f}/{(1 - args.split) * 100:.0f}")
     logger.info(f"Random Seed: {args.seed}")
+    logger.info(f"Output Directory: {args.output_dir or 'data/models/ (default)'}")
     logger.info("=" * 80)
 
     # Validate inputs
@@ -205,8 +213,9 @@ def main() -> None:
         logger.error(f"Failed to initialize BreezeClient: {e}")
         sys.exit(1)
 
-    # Create TeacherLabeler
-    teacher = TeacherLabeler(config, client=client)
+    # Create TeacherLabeler (US-028 Phase 6o: pass output_dir)
+    output_dir = Path(args.output_dir) if args.output_dir else None
+    teacher = TeacherLabeler(config, client=client, output_dir=output_dir)
 
     # Run training pipeline
     try:
@@ -234,6 +243,36 @@ def main() -> None:
         logger.info(f"  AUC-ROC:   {result.metrics['val_auc']:.4f}")
         logger.info("=" * 80)
 
+        # Output sample diagnostics in machine-readable format (US-028 Phase 6f)
+        # This allows train_teacher_batch.py to parse and track sample counts
+        import json
+        diagnostics = {
+            "sample_counts": {
+                "train_samples": result.train_samples,
+                "val_samples": result.val_samples,
+                "total_samples": result.train_samples + result.val_samples,
+                "feature_count": result.feature_count,
+            }
+        }
+        print(f"TEACHER_DIAGNOSTICS: {json.dumps(diagnostics)}")
+
+    except ValueError as e:
+        # US-028 Phase 6h: Handle insufficient samples as skip condition
+        error_msg = str(e)
+        if "Insufficient samples for training" in error_msg:
+            logger.warning(f"Window skipped: {error_msg}")
+            # Output skip marker for batch trainer to parse
+            import json
+            skip_info = {
+                "status": "skipped",
+                "reason": error_msg,
+            }
+            print(f"TEACHER_SKIP: {json.dumps(skip_info)}")
+            sys.exit(2)  # Exit code 2 indicates skip (not failure)
+        else:
+            # Other ValueError - treat as failure
+            logger.error(f"Training failed: {e}", exc_info=True)
+            sys.exit(1)
     except Exception as e:
         logger.error(f"Training failed: {e}", exc_info=True)
         sys.exit(1)

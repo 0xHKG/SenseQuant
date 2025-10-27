@@ -23,6 +23,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -30,6 +31,7 @@ from threading import Lock
 from typing import Any
 
 from loguru import logger
+from tqdm import tqdm
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -153,6 +155,20 @@ class StudentBatchTrainer:
             str(self.baseline_recall),
         ]
 
+        # US-028 Phase 7 Initiative 2: Add reward loop flags from Settings
+        from src.app.config import Settings
+        settings = Settings()  # type: ignore[call-arg]
+
+        if settings.reward_loop_enabled:
+            cmd.append("--enable-reward-loop")
+            cmd.extend(["--reward-horizon-days", str(settings.reward_horizon_days)])
+            cmd.extend(["--reward-weighting-mode", settings.reward_weighting_mode])
+
+            if settings.reward_ab_testing_enabled:
+                cmd.append("--reward-ab-testing")
+
+            logger.info(f"  Reward loop enabled: mode={settings.reward_weighting_mode}, horizon={settings.reward_horizon_days} days")
+
         try:
             # Execute training
             result = subprocess.run(
@@ -168,6 +184,9 @@ class StudentBatchTrainer:
                 # Extract metrics from output (if available)
                 metrics = self._extract_metrics_from_output(result.stdout)
 
+                # US-028 Phase 7 Initiative 2: Extract reward metrics
+                reward_metrics = self._extract_reward_metrics_from_output(result.stdout)
+
                 # Find promotion checklist
                 checklist_path = student_artifacts_path / "promotion_checklist.md"
 
@@ -177,6 +196,7 @@ class StudentBatchTrainer:
                     "promotion_checklist_path": str(checklist_path)
                     if checklist_path.exists()
                     else None,
+                    "reward_metrics": reward_metrics,  # US-028 Phase 7 Initiative 2
                 }
             else:
                 logger.error(f"✗ Student for {symbol} failed: {result.stderr}")
@@ -239,6 +259,25 @@ class StudentBatchTrainer:
 
         return metrics if metrics else None
 
+    def _extract_reward_metrics_from_output(self, stdout: str) -> dict[str, Any] | None:
+        """Extract reward metrics from training output (US-028 Phase 7 Initiative 2).
+
+        Args:
+            stdout: Training script stdout
+
+        Returns:
+            Dict with reward metrics or None if not found
+        """
+        for line in stdout.split("\n"):
+            if line.startswith("REWARD_METRICS_JSON:"):
+                try:
+                    json_str = line.split("REWARD_METRICS_JSON:", 1)[1].strip()
+                    return json.loads(json_str)
+                except (json.JSONDecodeError, IndexError) as e:
+                    logger.warning(f"Failed to parse reward metrics JSON: {e}")
+                    return None
+        return None
+
     def log_metadata(
         self,
         teacher_run: dict[str, Any],
@@ -255,6 +294,8 @@ class StudentBatchTrainer:
         # US-024 Phase 3: Get sentiment snapshot path from teacher run if available
         sentiment_snapshot_path = teacher_run.get("sentiment_snapshot_path")
 
+        # US-028 Phase 7 Initiative 2: reward_loop_enabled is determined automatically from reward_metrics
+
         StudentModel.log_batch_metadata(
             metadata_file=self.student_metadata_file,
             batch_id=self.batch_id,
@@ -268,6 +309,7 @@ class StudentBatchTrainer:
             error=result.get("error"),
             sentiment_snapshot_path=sentiment_snapshot_path,
             incremental=getattr(self, "incremental", False),  # US-024 Phase 4
+            reward_metrics=result.get("reward_metrics"),  # US-028 Phase 7 Initiative 2
         )
 
     def run_batch(self) -> dict[str, Any]:
@@ -291,27 +333,48 @@ class StudentBatchTrainer:
             self.student_metadata_file.write_text("")
 
         # Train student for each successful teacher run
-        for i, teacher_run in enumerate(successful_teacher_runs, 1):
-            symbol = teacher_run["symbol"]
-            logger.info(f"[{i}/{len(successful_teacher_runs)}] Processing {symbol}")
+        # US-028 Phase 7 Initiative 4: Progress monitoring with tqdm
+        with tqdm(total=len(successful_teacher_runs), desc="Training student models", unit="batch") as pbar:
+            for i, teacher_run in enumerate(successful_teacher_runs, 1):
+                symbol = teacher_run["symbol"]
+                logger.info(f"[{i}/{len(successful_teacher_runs)}] Processing {symbol}")
 
-            # Check resume
-            if self.resume and self.is_already_trained(teacher_run):
-                logger.info(f"⊙ Student for {symbol} already trained (skipping)")
-                self.stats["skipped"] += 1
-                continue
+                # Check resume
+                if self.resume and self.is_already_trained(teacher_run):
+                    logger.info(f"⊙ Student for {symbol} already trained (skipping)")
+                    self.stats["skipped"] += 1
+                    # US-028 Phase 7 Initiative 4: Update progress bar
+                    pbar.update(1)
+                    pbar.set_postfix({
+                        "symbol": symbol[:15],
+                        "status": "skipped",
+                        "trained": self.stats["completed"],
+                        "skipped": self.stats["skipped"],
+                        "failed": self.stats["failed"],
+                    })
+                    continue
 
-            # Train student
-            result = self.train_student(teacher_run)
+                # Train student
+                result = self.train_student(teacher_run)
 
-            # Log metadata
-            self.log_metadata(teacher_run, result)
+                # Log metadata
+                self.log_metadata(teacher_run, result)
 
-            # Update stats
-            if result["status"] == "success":
-                self.stats["completed"] += 1
-            else:
-                self.stats["failed"] += 1
+                # Update stats
+                if result["status"] == "success":
+                    self.stats["completed"] += 1
+                else:
+                    self.stats["failed"] += 1
+
+                # US-028 Phase 7 Initiative 4: Update progress bar
+                pbar.update(1)
+                pbar.set_postfix({
+                    "symbol": symbol[:15],
+                    "status": result["status"],
+                    "trained": self.stats["completed"],
+                    "skipped": self.stats["skipped"],
+                    "failed": self.stats["failed"],
+                })
 
         # Generate summary
         trained_count = len(successful_teacher_runs)
