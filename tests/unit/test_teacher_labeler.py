@@ -420,7 +420,7 @@ def test_save_artifacts_creates_files(sample_ohlcv_data: pd.DataFrame, tmp_path:
 
             # Verify TrainingResult fields
             assert training_result.model_path.endswith(".pkl")
-            assert training_result.labels_path.endswith(".csv")
+            assert training_result.labels_path.endswith(".csv.gz")
             assert training_result.importance_path.endswith(".csv")
             assert training_result.metadata_path.endswith(".json")
             assert training_result.feature_count > 0

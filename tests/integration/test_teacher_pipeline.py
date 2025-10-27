@@ -88,7 +88,7 @@ def test_full_training_pipeline(mock_client_large_data: MagicMock) -> None:
 
             # Verify result structure
             assert result.model_path.endswith(".pkl")
-            assert result.labels_path.endswith(".csv")
+            assert result.labels_path.endswith(".csv.gz")
             assert result.importance_path.endswith(".csv")
             assert result.metadata_path.endswith(".json")
 
@@ -511,3 +511,187 @@ def test_batch_trainer_error_reporting_with_traceback() -> None:
         assert "error_detail" in result
         assert "timeout_seconds" in result["error_detail"]
         assert result["error_detail"]["timeout_seconds"] == 600
+
+
+def test_batch_trainer_skips_zero_sample_windows() -> None:
+    """Test that BatchTrainer skips windows with zero samples after filtering (US-028 Phase 6f)."""
+    from pathlib import Path
+    from unittest.mock import MagicMock, patch
+    from src.app.config import Settings
+    from scripts.train_teacher_batch import BatchTrainer
+
+    settings = MagicMock(spec=Settings)
+    settings.batch_training_output_dir = "data/models"
+    settings.parallel_retry_limit = 1
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_dir = Path(tmpdir)
+        trainer = BatchTrainer(settings=settings, output_dir=output_dir,
+                              resume=False, incremental=False, workers=1)
+
+        task = {
+            "symbol": "TEST",
+            "start_date": "2024-01-01",
+            "end_date": "2024-03-31",
+            "window_label": "TEST_2024-01-01_to_2024-03-31",
+            "artifacts_path": str(output_dir / "TEST_2024-01-01_to_2024-03-31"),
+        }
+
+        # Mock subprocess that succeeds but returns zero samples
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = """
+2025-10-14 02:00:00 | INFO     | Training Complete!
+Training Samples: 0
+Validation Samples: 0
+TEACHER_DIAGNOSTICS: {"sample_counts": {"train_samples": 0, "val_samples": 0, "total_samples": 0, "feature_count": 50}}
+"""
+        mock_result.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_result):
+            result = trainer.train_window(task, forecast_horizon=7)
+
+        # Should be marked as skipped (not failed)
+        assert result["status"] == "skipped"
+        assert "reason" in result
+        assert "Insufficient samples" in result["reason"]
+        assert "0 total samples" in result["reason"]
+
+        # Should include sample counts in result
+        assert "sample_counts" in result
+        assert result["sample_counts"]["total_samples"] == 0
+        assert result["sample_counts"]["train_samples"] == 0
+        assert result["sample_counts"]["val_samples"] == 0
+
+        # Should not have metrics (no model trained)
+        assert result["metrics"] is None
+
+
+def test_batch_trainer_includes_sample_diagnostics_on_success() -> None:
+    """Test that successful training includes sample count diagnostics (US-028 Phase 6f)."""
+    from pathlib import Path
+    from unittest.mock import MagicMock, patch
+    from src.app.config import Settings
+    from scripts.train_teacher_batch import BatchTrainer
+
+    settings = MagicMock(spec=Settings)
+    settings.batch_training_output_dir = "data/models"
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        output_dir = Path(tmpdir)
+        trainer = BatchTrainer(settings=settings, output_dir=output_dir,
+                              resume=False, incremental=False, workers=1)
+
+        task = {
+            "symbol": "TEST",
+            "start_date": "2024-01-01",
+            "end_date": "2024-03-31",
+            "window_label": "TEST_2024-01-01_to_2024-03-31",
+            "artifacts_path": str(output_dir / "TEST_2024-01-01_to_2024-03-31"),
+        }
+
+        # Mock successful training with sample counts
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = """
+2025-10-14 02:00:00 | INFO     | Training Complete!
+Training Samples: 800
+Validation Samples: 200
+Precision: 0.85
+TEACHER_DIAGNOSTICS: {"sample_counts": {"train_samples": 800, "val_samples": 200, "total_samples": 1000, "feature_count": 50}}
+"""
+        mock_result.stderr = ""
+
+        with patch("subprocess.run", return_value=mock_result):
+            result = trainer.train_window(task, forecast_horizon=7)
+
+        # Should succeed
+        assert result["status"] == "success"
+
+        # Should include sample counts
+        assert "sample_counts" in result
+        assert result["sample_counts"]["total_samples"] == 1000
+        assert result["sample_counts"]["train_samples"] == 800
+        assert result["sample_counts"]["val_samples"] == 200
+        assert result["sample_counts"]["feature_count"] == 50
+
+        # Should have metrics
+        assert result["metrics"] is not None
+
+
+def test_batch_trainer_skips_insufficient_samples_minimum_threshold() -> None:
+    """Test that BatchTrainer skips windows with < 20 samples (US-028 Phase 6h)."""
+    from unittest.mock import MagicMock, patch
+
+    from scripts.train_teacher_batch import BatchTrainer
+    from src.app.config import Settings
+
+    settings = Settings()
+    trainer = BatchTrainer(
+        output_dir=Path("/tmp/test_batch"),
+        workers=1,
+        settings=settings,
+    )
+
+    # Create a test task
+    task = {
+        "symbol": "TEST",
+        "start_date": "2024-01-01",
+        "end_date": "2024-03-31",
+        "window_label": "TEST_2024-01-01_to_2024-03-31",
+        "artifacts_path": "/tmp/test_batch/TEST_2024-01-01_to_2024-03-31",
+    }
+
+    # Mock subprocess that returns exit code 2 (skip) with insufficient samples message
+    mock_result = MagicMock()
+    mock_result.returncode = 2
+    mock_result.stdout = """
+Window skipped: Insufficient samples for training: 15 < 20 minimum.
+TEACHER_SKIP: {"status": "skipped", "reason": "Insufficient samples for training: 15 < 20 minimum. Consider increasing window size or reducing forecast horizon."}
+"""
+    mock_result.stderr = ""
+
+    with patch("subprocess.run", return_value=mock_result):
+        result = trainer.train_window(task, forecast_horizon=7)
+
+    # Should be marked as skipped
+    assert result["status"] == "skipped"
+    assert "Insufficient samples for training" in result["reason"]
+    assert result["sample_counts"] is None
+    assert result["metrics"] is None
+
+
+def test_batch_trainer_recognizes_exit_code_2_as_skip() -> None:
+    """Test that BatchTrainer treats exit code 2 as skip, not failure (US-028 Phase 6h)."""
+    from unittest.mock import MagicMock, patch
+
+    from scripts.train_teacher_batch import BatchTrainer
+    from src.app.config import Settings
+
+    settings = Settings()
+    trainer = BatchTrainer(
+        output_dir=Path("/tmp/test_batch"),
+        workers=1,
+        settings=settings,
+    )
+
+    task = {
+        "symbol": "TEST",
+        "start_date": "2024-01-01",
+        "end_date": "2024-03-31",
+        "window_label": "TEST_2024-01-01_to_2024-03-31",
+        "artifacts_path": "/tmp/test_batch/TEST_2024-01-01_to_2024-03-31",
+    }
+
+    # Mock subprocess with exit code 2
+    mock_result = MagicMock()
+    mock_result.returncode = 2
+    mock_result.stdout = 'TEACHER_SKIP: {"status": "skipped", "reason": "Test skip"}'
+    mock_result.stderr = ""
+
+    with patch("subprocess.run", return_value=mock_result):
+        result = trainer.train_window(task, forecast_horizon=7)
+
+    # Should be skipped, NOT failed
+    assert result["status"] == "skipped"
+    assert result["status"] != "failed"

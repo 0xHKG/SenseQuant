@@ -138,11 +138,14 @@ def test_student_training_with_mock_data(tmp_path):
     teacher_dir = tmp_path / "models" / "teacher"
     teacher_dir.mkdir(parents=True)
 
-    # Mock labels
+    # Mock labels with features
     labels_data = {
         "timestamp": pd.date_range("2024-01-01", periods=200, freq="1h"),
         "symbol": ["RELIANCE"] * 200,
         "label": [0, 1, 2] * 66 + [0, 1],  # Balanced distribution
+        "feature_1": [50.0 + i * 0.1 for i in range(200)],
+        "feature_2": [2500.0 + i * 0.5 for i in range(200)],
+        "feature_3": [1000000 + i * 100 for i in range(200)],
     }
     labels_df = pd.DataFrame(labels_data)
 
