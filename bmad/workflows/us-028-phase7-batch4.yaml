@@ -1,0 +1,17 @@
+steps:
+  - role: scrum_master
+    agent: claude-scrum
+    prompt: |
+      {{ file "bmad/prompts/scrum_master.txt" }}
+  - role: developer
+    agent: claude-code
+    prompt: |
+      {{ file "bmad/prompts/developer.txt" }}
+  - role: qa
+    agent: claude-qa
+    prompt: |
+      {{ file "bmad/prompts/qa.txt" }}
+  - role: documentation
+    agent: claude-docs
+    prompt: |
+      {{ file "bmad/prompts/docs.txt" }}
