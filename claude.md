@@ -1834,3 +1834,101 @@ Continued from previous session that ended at context limit. OBEROI symbol faile
 **Session Completion Date**: 2025-10-28
 **Next Session Focus**: Execute Batch 4 teacher training, validate artifacts, optional reward loop pipeline integration
 **Status**: ✅ **Phase 7 Batch 4 Complete** - Ready for Teacher Training
+
+---
+
+## Session 2025-10-28 (Continued) - Batch 4 Teacher Training Execution
+
+**Context**: Continued from previous session that reached context limit. Fixed training blockers and executed full Batch 4 teacher training.
+
+### Critical Bug Fixes
+
+**1. Timezone Comparison Error (DRYRUN Mode)**
+- **Issue**: Training failed with "Cannot compare tz-naive and tz-aware timestamps"
+- **Root Cause**: Historical CSV data has timezone-aware timestamps (UTC+05:30), but teacher service created tz-naive filter bounds
+- **Location**: `src/services/teacher_student.py:119-120`
+- **Fix**: Added `tz="Asia/Kolkata"` to pd.Timestamp() calls for start/end bounds
+- **Impact**: Fixed all CSV data loading in DRYRUN mode
+
+**2. Bar Initialization Error**
+- **Issue**: Training failed with "Bar.__init__() got an unexpected keyword argument 'symbol'"
+- **Root Cause**: Bar dataclass only accepts 6 fields (ts, open, high, low, close, volume), but breeze_client passed 7
+- **Location**: `src/adapters/breeze_client.py:340`
+- **Fix**: Removed `symbol=symbol` parameter from Bar() constructor call
+- **Impact**: Fixed bar object creation from cached CSV data
+
+### Training Execution Results
+
+**Run Details:**
+- **Run ID**: `live_candidate_20251028_154400`
+- **Start**: 15:44:00
+- **End**: 16:02:15
+- **Duration**: 18 minutes
+- **Exit Code**: 0 (success)
+
+**Phase-by-Phase Results:**
+- Phase 1: Data Ingestion - Skipped (--skip-fetch)
+- Phase 2: Teacher Training - ✅ 6 minutes (216/252 windows success, 36 skipped, 0 failed)
+- Phase 3: Student Training - ✅ 3 minutes (216 runs, mean reward=0.0161, positive=4957)
+- Phase 4: Model Validation - ✅ 9 minutes (validation_20251028_155300 passed)
+- Phase 5: Statistical Tests - ✅ <1 second (all tests passed)
+- Phase 6: Release Audit - ✅ <1 second (audit bundle created)
+- Phase 7: Promotion Briefing - ✅ <1 second (ready-for-review)
+
+**Training Metrics:**
+- Total windows: 252
+- Success: 216 (85.7%)
+- Skipped: 36 (14.3% - final window per symbol, insufficient future data)
+- Failed: 0 (0%)
+- Symbols: 36/36 (100%)
+
+**Artifacts Created:**
+- Batch directory: `data/models/20251028_154400/`
+- Teacher runs: `data/models/20251028_154400/teacher_runs.json`
+- Student runs: `data/models/20251028_154400/student_runs.json`
+- Release audit: `release/audit_live_candidate_20251028_154400/`
+- Training log: `logs/batch4_teacher_training_20251028_154357.log`
+
+### Known Limitations
+
+**1. Telemetry Not Enabled**
+- Training run did not include `--enable-telemetry` flag
+- No `data/analytics/` directory created
+- Dashboard remained blank during training
+- **TODO**: Add `--enable-telemetry` to future training runs
+
+**2. Single GPU Utilization**
+- Training used only GPU 1 (~30% utilization peak)
+- GPU 0 remained idle throughout run
+- **TODO**: Investigate multi-GPU training support for 2x speedup
+
+### Documentation Updates
+
+**Files Created:**
+- `docs/batch4-training-results.md` - Complete training report with metrics, fixes, and validation results
+
+**Files Modified:**
+- `docs/batch4-ingestion-report.md` - Added training execution completion section
+- `claude.md` - This session log
+- `docs/stories/us-028-historical-run.md` - Updated Phase 7 Batch 4 completion stats
+
+### Session Summary
+
+- ✓ Fixed 2 critical bugs blocking training (timezone + Bar initialization)
+- ✓ Executed full Batch 4 teacher training (36 symbols, 18 minutes)
+- ✓ Achieved 100% symbol coverage with 0 failures
+- ✓ All 7 orchestrator phases completed successfully
+- ✓ Artifacts validated and documented
+- ✓ Release audit passed - ready for review
+
+### Next Steps
+1. Review promotion briefing: `release/audit_live_candidate_20251028_154400/promotion_briefing.md`
+2. Approve candidate run if metrics acceptable
+3. Future: Re-run with --enable-telemetry for monitoring
+4. Future: Investigate multi-GPU training support
+
+---
+
+**Session Completion Date**: 2025-10-28
+**Next Session Focus**: Review and approve candidate run, plan next phase of NIFTY 100 expansion
+**Status**: ✅ **Phase 7 Batch 4 COMPLETE** - Training Successful, Ready for Review

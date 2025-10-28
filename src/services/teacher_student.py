@@ -116,8 +116,8 @@ class TeacherLabeler:
             },
         )
 
-        start_ts = pd.Timestamp(self.config.start_date)
-        end_ts = pd.Timestamp(self.config.end_date)
+        start_ts = pd.Timestamp(self.config.start_date, tz="Asia/Kolkata")
+        end_ts = pd.Timestamp(self.config.end_date, tz="Asia/Kolkata")
 
         bars = self.client.historical_bars(
             symbol=self.config.symbol,

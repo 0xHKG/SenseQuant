@@ -337,7 +337,6 @@ class BreezeClient:
                             low=float(row['low']),
                             close=float(row['close']),
                             volume=int(row['volume']),
-                            symbol=symbol,
                         ))
 
             logger.info(
