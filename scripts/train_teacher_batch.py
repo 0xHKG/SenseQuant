@@ -100,6 +100,52 @@ class BatchTrainer:
         # Task retry tracking
         self.task_attempts: dict[str, int] = {}  # task_id -> attempt count
 
+        # US-028 Phase 7 Batch 4: Multi-GPU support
+        self.available_gpus = self._detect_gpus()
+        self.num_gpus = len(self.available_gpus)
+
+        if self.num_gpus > 0:
+            logger.info(f"Detected {self.num_gpus} GPU(s): {self.available_gpus}")
+        else:
+            logger.warning("No GPUs detected - training will use CPU (slow)")
+
+        if self.workers > 1 and self.num_gpus == 0:
+            logger.warning(
+                "Multi-worker mode requested but no GPUs detected. "
+                "Training will use CPU (significantly slower)."
+            )
+        elif self.workers > self.num_gpus > 0:
+            logger.info(
+                f"Workers ({self.workers}) > GPUs ({self.num_gpus}). "
+                f"Multiple workers will share GPUs via round-robin assignment."
+            )
+
+    def _detect_gpus(self) -> list[int]:
+        """Detect available CUDA GPUs (US-028 Phase 7 Batch 4).
+
+        Returns:
+            List of GPU device IDs (e.g., [0, 1] for 2 GPUs)
+        """
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", "--query-gpu=index", "--format=csv,noheader"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            gpu_ids = [
+                int(line.strip())
+                for line in result.stdout.strip().split("\n")
+                if line.strip()
+            ]
+            return gpu_ids
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            logger.warning("nvidia-smi not found or failed, assuming no GPUs")
+            return []
+        except Exception as e:
+            logger.error(f"Failed to detect GPUs: {e}")
+            return []
+
     def generate_training_windows(
         self,
         symbols: list[str],
@@ -826,17 +872,25 @@ class BatchTrainer:
             return
 
         # US-028 Phase 7 Initiative 4: Progress monitoring for parallel execution
+        # US-028 Phase 7 Batch 4: Multi-GPU support with round-robin assignment
         with ProcessPoolExecutor(max_workers=self.workers) as executor:
-            # Submit filtered tasks
-            future_to_task = {
-                executor.submit(
+            # Submit filtered tasks with GPU assignment
+            future_to_task = {}
+            for task_idx, task in enumerate(tasks_to_run):
+                # Round-robin GPU assignment
+                if self.num_gpus > 0:
+                    gpu_id = self.available_gpus[task_idx % self.num_gpus]
+                else:
+                    gpu_id = None  # CPU fallback
+
+                future = executor.submit(
                     self._train_window_worker,
                     task,
                     forecast_horizon,
                     self.settings,
-                ): task
-                for task in tasks_to_run
-            }
+                    gpu_id,  # NEW: GPU assignment
+                )
+                future_to_task[future] = task
 
             # Process completed tasks with progress bar
             with tqdm(total=len(tasks_to_run), desc="Training teacher models (parallel)", unit="window") as pbar:
@@ -895,6 +949,7 @@ class BatchTrainer:
         task: dict[str, Any],
         forecast_horizon: int,
         settings: Settings,
+        gpu_id: int | None = None,
     ) -> dict[str, Any]:
         """Worker function for parallel execution.
 
@@ -904,10 +959,28 @@ class BatchTrainer:
             task: Training task dict
             forecast_horizon: Forecast horizon in days
             settings: Application settings
+            gpu_id: GPU device ID to use (None = CPU fallback) - US-028 Phase 7 Batch 4
 
         Returns:
             Result dict with status, metrics, error, attempts
         """
+        # US-028 Phase 7 Batch 4: Pin process to specific GPU
+        import os
+
+        if gpu_id is not None:
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+            logger.info(
+                f"Worker assigned to GPU {gpu_id}",
+                extra={"symbol": task["symbol"], "window": task["window_label"]},
+            )
+        else:
+            # CPU fallback (remove GPU from visibility)
+            os.environ["CUDA_VISIBLE_DEVICES"] = ""
+            logger.warning(
+                "Worker using CPU (no GPU assigned)",
+                extra={"symbol": task["symbol"], "window": task["window_label"]},
+            )
+
         max_attempts = settings.parallel_retry_limit
         backoff_seconds = settings.parallel_retry_backoff_seconds
 
