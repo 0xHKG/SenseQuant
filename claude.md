@@ -96,6 +96,96 @@
 
 ---
 
+## Session 2025-10-28: US-028 Phase 7 Batch 4 - Symbol Discovery & Ingestion
+
+### Context
+Continued from previous session that ran out of context. Completed US-028 Phase 7 Batch 4 symbol discovery and historical data ingestion for NIFTY 100 constituents.
+
+### Work Completed
+
+#### 1. Symbol Discovery (Task 1)
+- **Script:** `scripts/discover_symbol_mappings.py`
+- **Result:** 35/36 symbols successfully mapped to ISEC codes
+- **Failed:** OBEROI (Breeze API returned "Result Not Found")
+- **Output:** `data/historical/metadata/symbol_mappings_batch4.json`
+
+#### 2. Symbol Mapping Merge (Task 2)
+- Merged 30 Batch 4 mappings into master `symbol_mappings.json`
+- All mappings already existed from Batch 3 work
+- Total mappings in master: 95
+
+#### 3. Bulk Historical Data Ingestion (Task 4)
+- **Date Range:** 2022-01-01 to 2024-12-31 (3 years)
+- **Interval:** 1day
+- **Runtime:** 15 minutes 9 seconds
+- **Metrics:**
+  - Symbols processed: 36 (35 successful, 1 failed)
+  - Total rows ingested: 8,470
+  - Chunks fetched from API: 140
+  - Chunks loaded from cache: 315 (69.2% cache hit rate)
+  - Failed chunks: 13 (all OBEROI)
+- **Mode:** Temporarily enabled MODE=live, restored to MODE=dryrun after completion
+
+#### 4. Post-Ingestion Coverage Audit (Task 5)
+- **Script:** `scripts/check_symbol_coverage.py`
+- **Coverage:** 97.2% (35/36 symbols verified)
+- **Status:** 35 OK, 1 missing_local (OBEROI)
+- **Reports:**
+  - `data/historical/metadata/coverage_report_20251028_034050.jsonl`
+  - `data/historical/metadata/coverage_summary_20251028_034050.json`
+
+#### 5. Documentation & Metadata Updates (Task 6)
+- Created `docs/batch4-ingestion-report.md` with complete metrics and analysis
+- Updated `data/historical/metadata/nifty100_constituents.json`:
+  - breeze_verified: 30 → 65 (+35 from Batch 4)
+  - breeze_unverified: 70 → 34
+  - breeze_failed: 1 (OBEROI)
+- Committed documentation (e197f69)
+
+### Known Issues
+
+**OBEROI Symbol Failure**
+- **Root Cause:** No ISEC/Breeze stock code mapping available
+- **API Response:** "Result Not Found" from Breeze `get_names()` method
+- **Impact:** Unable to fetch historical data for OBEROI
+- **Status:** Requires manual investigation
+
+### Solutions & Next Steps
+
+1. **OBEROI Investigation:**
+   - Verify correct NSE ticker symbol
+   - Check ISEC Direct platform for alternative stock code
+   - Consider alternative data source if mapping unavailable
+
+2. **Phase 7 Continuation:**
+   - Resume reward loop implementation and testing
+   - Plan bulk teacher training for newly ingested Batch 4 symbols
+   - Prepare for Batch 5 planning (if applicable)
+
+3. **Data Quality:**
+   - All 35 successful symbols show normal gap patterns (weekends/holidays)
+   - No data quality issues detected
+   - Duplicate handling working correctly
+
+### Artifacts Generated
+- `docs/batch4-ingestion-report.md` (committed)
+- `data/historical/metadata/symbol_mappings_batch4.json`
+- `data/historical/metadata/coverage_report_20251028_034050.jsonl`
+- `data/historical/metadata/coverage_summary_20251028_034050.json`
+- `logs/batch4_ingestion_20251028_030837.log`
+- `logs/batch4_coverage_audit_post.log`
+
+### Metrics Summary
+- **Total NIFTY 100 Coverage:** 65 verified symbols (Batches 1-4)
+- **Batch 4 Success Rate:** 97.2% (35/36)
+- **Total Historical Data:** 8,470 new rows (2022-2024, 1day interval)
+- **Session Duration:** ~35 minutes (symbol discovery + ingestion + QA)
+
+### Git Commits
+- `e197f69` - Add US-028 Phase 7 Batch 4 ingestion report
+
+---
+
 ## Session Wrap-Up (2025-10-16)
 
 ### US-028 Phase 7 — NIFTY100 Batch 3 Ingestion Complete
@@ -1638,3 +1728,109 @@ cat release/audit_validation_20251014_231858/stat_tests.json | python -m json.to
 **Session Completion Date**: 2025-10-14
 **Next Session Focus**: Sprint 1 Kickoff - Initiative 4 (Progress Monitoring) + Initiative 1 (Data Universe Expansion)
 **Status**: ✅ **Phase 7 Planning Complete** - Ready for Implementation
+
+---
+
+## 2025-10-28: US-028 Phase 7 Batch 4 OBEROI Fix & Training Prep (Continued Session)
+
+### Context
+Continued from previous session that ended at context limit. OBEROI symbol failed initial Batch 4 ingestion due to missing symbol mapping. This session completed the fix and prepared for teacher training.
+
+### Tasks Completed
+
+#### 1. OBEROI Mapping Fix & Re-Ingestion
+- **Issue**: OBEROI symbol failed with Breeze API "Result Not Found" error
+- **Root Cause**: Incorrect NSE symbol format - should be "OBEROIRLTY" not "OBEROI"
+- **Corrected Mapping**: OBEROIRLTY → ISEC code "OBEREA" (token 20242)
+- **Metadata Updated** (untracked):
+  - `data/historical/metadata/symbol_mappings_batch4.json` (36/36 success, 31 mappings)
+  - `data/historical/metadata/symbol_mappings.json` (96 total mappings)
+  - `data/historical/metadata/nifty100_constituents.json` (OBEROI status=verified)
+
+**Re-Ingestion Results:**
+- Date range: 2022-01-01 to 2024-12-31 (3 years)
+- Chunks fetched: 13/13 successful
+- Total rows: 743
+- Runtime: 27 seconds
+- Log: `logs/oberoi_reingestion_20251028_130719.log` (untracked)
+- Data: `data/historical/OBEROI/1day/*.csv` (743 files, untracked)
+
+#### 2. Coverage Audit & Verification
+- **Audit Timestamp**: 20251028_132901
+- **Initial Error**: Used wrong symbol list (37 symbols), showed 62.2% coverage
+- **Corrected**: Re-ran with exact 36 Batch 4 symbols from `nifty100_batch4.txt`
+- **Final Result**: 100% coverage (36/36 symbols ok)
+- **OBEROI Verified**: Status "ok" with 743 files, 1day interval
+
+**Coverage Files Generated** (untracked):
+- `data/historical/metadata/coverage_report_20251028_132901.jsonl`
+- `data/historical/metadata/coverage_summary_20251028_132901.json`
+- `logs/batch4_coverage_audit_oberoi_fixed_20251028_132854.log`
+
+#### 3. Reward Loop Integration Status Review
+- **Files**: `src/services/reward_calculator.py` (305 lines), `tests/integration/test_reward_loop.py` (679 lines)
+- **Implementation Status**: Complete - RewardCalculator class fully implemented
+- **Test Results**: 17/17 passing, 3 skipped (require full teacher artifacts)
+- **Integration Gaps**: Needs wiring into `scripts/train_student.py` (CLI flags, sample weights)
+- **Next Steps**: Pipeline integration deferred to future session
+
+**RewardCalculator Features:**
+- Single/batch reward calculation with direction matching
+- JSONL logging (reward_history.jsonl)
+- Statistical aggregation (mean, cumulative, volatility)
+- Sample weighting (linear, exponential, none modes)
+- StudentModel metadata integration
+
+#### 4. Batch 4 Teacher Training Preparation
+- **Training Symbols**: Created `data/historical/metadata/batch4_training_symbols.txt` (36 symbols, untracked)
+- **Resource Check**: 2x RTX A6000 GPUs (98+ GB available), 4.7 TB disk space
+- **Pre-Flight Tests**: 13/13 passing (`tests/integration/test_teacher_pipeline.py`)
+
+**Training Plan:**
+- Date range: 2022-01-01 to 2024-12-31
+- Expected runtime: 2-4 hours (sequential), 1-2 hours (parallel)
+- Minimum success: 95% (34/36 symbols)
+- Command: `python scripts/run_historical_training.py --symbols $(cat data/historical/metadata/batch4_training_symbols.txt | tr '\n' ' ') --start-date 2022-01-01 --end-date 2024-12-31 --skip-fetch`
+
+#### 5. Documentation Updates
+- **File**: `docs/batch4-ingestion-report.md` (staged)
+- **Updates**: Status changed to "100% Coverage Achieved", added OBEROI fix section, coverage audit results, teacher training plan
+- **Sections Added**: Mapping correction, re-ingestion results, post-fix coverage audit, teacher training plan (objectives, resources, commands, quality gates, rollback)
+
+### Test Results
+- Reward loop tests: 17 passed, 3 skipped (2.43s)
+- Teacher pipeline tests: 13 passed (2.26s)
+- Coverage audit: 36/36 symbols ok (100%)
+
+### Deliverables
+- ✓ OBEROI mapping corrected and data ingested (743 rows)
+- ✓ Batch 4 coverage audit: 100% (36/36 symbols)
+- ✓ Reward loop implementation reviewed (17/17 tests passing)
+- ✓ Teacher training plan documented and validated
+- ✓ Pre-flight tests passing (13/13)
+- ✓ Documentation staged for commit
+
+### Next Steps
+1. Execute Batch 4 teacher training (36 symbols, 2-4 hours)
+2. Validate training artifacts (teacher_runs.json, labels.csv.gz)
+3. Update NIFTY 100 teacher model coverage metrics
+4. Future: Integrate reward loop into training pipeline
+
+### Files Modified (Tracked)
+- `docs/batch4-ingestion-report.md` (staged)
+
+### Artifacts Created (Untracked)
+- `data/historical/OBEROI/1day/*.csv` (743 files)
+- `data/historical/metadata/batch4_training_symbols.txt`
+- `data/historical/metadata/coverage_report_20251028_132901.jsonl`
+- `data/historical/metadata/coverage_summary_20251028_132901.json`
+- `logs/oberoi_reingestion_20251028_130719.log`
+- `logs/batch4_coverage_audit_oberoi_fixed_20251028_132854.log`
+- `src/services/reward_calculator.py` (reward loop - future integration)
+- `tests/integration/test_reward_loop.py` (reward loop - future integration)
+
+---
+
+**Session Completion Date**: 2025-10-28
+**Next Session Focus**: Execute Batch 4 teacher training, validate artifacts, optional reward loop pipeline integration
+**Status**: ✅ **Phase 7 Batch 4 Complete** - Ready for Teacher Training

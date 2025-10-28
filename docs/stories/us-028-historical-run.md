@@ -4234,3 +4234,75 @@ The reward loop integration is fully functional and tested. It can be enabled fo
 **Validation Status**: ✅ COMPLETE  
 **Production Status**: ✅ READY FOR DEPLOYMENT
 
+
+---
+
+## Phase 7: NIFTY 100 Batch Processing (Historical Data Ingestion)
+
+### Overview
+NIFTY 100 symbol universe expansion through batch-wise historical data ingestion (2022-2024).
+
+### Status Summary
+- **Phase 7 Status:** Complete (2025-10-28)
+- **Total Symbols Verified:** 66/100 (Batches 1-4)
+- **Pending:** 34 symbols (Batch 5 planning)
+- **Failed:** 0 symbols (OBEROI resolved)
+
+### Batch 3: Core NIFTY 100 Constituents
+- **Status:** ✓ Complete
+- **Symbols:** 30 verified (LT, TITAN, LICI, ADANIPORTS, BAJAJFINSV, INDUSINDBK, PNB, BANKBARODA, CANBK, ASIANPAINT, COALINDIA, GRASIM, HEROMOTOCO, EICHERMOT, TVSMOTOR, BAJAJ-AUTO, MOTHERSON, JSWSTEEL, MPHASIS, PERSISTENT, COFORGE, DIVISLAB, BIOCON, LUPIN, AUROPHARMA, IOC, BPCL, GAIL, MARICO, GODREJCP)
+- **Date:** 2025-10-16
+- **Coverage:** 60% (30/100 symbols)
+
+### Batch 4: Final NIFTY 100 Constituents
+- **Status:** ✓ Complete - 36/36 symbols (100% coverage after OBEROI fix)
+- **Date:** 2025-10-28 (initial), 2025-10-28 (OBEROI fix)
+- **Runtime:** 15 minutes 9 seconds (initial batch), 27 seconds (OBEROI re-ingestion)
+- **Symbols Ingested:** 36 (COLPAL, PIDILITIND, HAL, HINDALCO, VEDL, TATASTEEL, JINDALSTEL, NMDC, ULTRACEMCO, AMBUJACEM, ACC, SHREECEM, TRENT, ADANIENT, INDIGO, VOLTAS, MUTHOOTFIN, PFC, RECLTD, LICHSGFIN, SBILIFE, APOLLOHOSP, MAXHEALTH, FORTIS, DLF, GODREJPROP, OBEROI, BERGEPAINT, HAVELLS, SIEMENS, ABB, BOSCHLTD, CUMMINSIND, BHARATFORG, LTTS, LTIM)
+- **Total Rows:** 9,213 (8,470 + 743 OBEROI)
+- **Documentation:** [docs/batch4-ingestion-report.md](docs/batch4-ingestion-report.md)
+- **Coverage:** 66% (66/100 symbols total)
+
+### Total Verified (Batches 1-4)
+- **Symbols:** 66
+- **Date Range:** 2022-01-01 to 2024-12-31 (3 years)
+- **Intervals:** 1day
+
+### Phase 7 Batch 4 Completion (2025-10-28)
+
+**Status:** ✓ COMPLETE - 100% Coverage Achieved
+
+**OBEROI Mapping Fix:**
+- Issue: OBEROI symbol failed initial ingestion with "Result Not Found" error
+- Root cause: Incorrect NSE symbol format (should be "OBEROIRLTY" not "OBEROI")
+- Corrected mapping: OBEROIRLTY → ISEC code "OBEREA" (token 20242)
+- Re-ingestion: 743 rows successfully ingested (2022-2024, 1day interval)
+- Verification: Coverage audit timestamp 20251028_132901 confirms status "ok"
+
+**Coverage Audit Results:**
+- Audit timestamp: 20251028_132901
+- Total symbols: 36/36 Batch 4 symbols
+- Coverage rate: 100.0%
+- OBEROI verification: ✓ Status "ok" with 743 files
+- Coverage files: `coverage_report_20251028_132901.jsonl`, `coverage_summary_20251028_132901.json` (untracked)
+
+**Teacher Training Preparation:**
+- Training symbol file: `data/historical/metadata/batch4_training_symbols.txt` (36 symbols, untracked)
+- Resource verification: 2x RTX A6000 GPUs (98+ GB available), 4.7 TB disk space
+- Pre-flight tests: 13/13 passing (`test_teacher_pipeline.py`)
+- Training plan: Documented in `docs/batch4-ingestion-report.md` with commands, quality gates, rollback plan
+- Expected runtime: 2-4 hours (sequential processing)
+
+**Overall NIFTY 100 Coverage:**
+- Verified symbols: 66/100 (66%)
+- Batch 4 contribution: 36 symbols (100% success rate after OBEROI fix)
+
+**Reward Loop Status:**
+- Implementation: Complete (`reward_calculator.py`, 305 lines)
+- Test coverage: 17/17 passing, 3 skipped (require full teacher artifacts)
+- Integration: Deferred to future session (needs wiring into `train_student.py`)
+
+**Next Actions:**
+1. Execute Batch 4 teacher training (36 symbols)
+2. Validate training artifacts
+3. Optional: Integrate reward loop into training pipeline
