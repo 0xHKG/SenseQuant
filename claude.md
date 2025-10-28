@@ -2389,3 +2389,39 @@ All official NIFTY 100 constituents from `nifty100_constituents.json` symbols ar
 
 **Session Completion**: 2025-10-28
 **Result**: ✅ **Investigation Complete - 96-symbol universe confirmed as maximum available**
+
+---
+
+## Session 2025-10-28 (Late Night) - Training Telemetry Dashboard Implementation
+
+**Objective**: Enable Streamlit dashboard to visualize training telemetry from `training_run_*.jsonl` files
+
+### Implementation Summary
+
+**Changes Made**:
+1. **Fixed Indentation Error** - Properly nested all backtest visualization code under `with tab1:` context (133 lines)
+2. **Added Training Telemetry Loader** - `load_training_telemetry()` function scans `data/analytics/training/` for JSONL files
+3. **Added Training Visualization** - `render_training_telemetry_tab()` with:
+   - Run selector (defaults to latest run)
+   - Phase progress summary table
+   - Per-symbol window statistics
+   - Event timeline scatter chart
+   - Raw events table (expandable)
+4. **Two-Tab Interface** - "Backtest Telemetry" and "Training Telemetry" tabs
+
+**File Modified**: `dashboards/telemetry_dashboard.py`
+
+**Testing**:
+- Syntax validated: `python3 -m py_compile` successful
+- Streamlit launch verified: Dashboard accessible at http://localhost:8501
+- Training data available: 5 runs in `data/analytics/training/` (latest: `training_run_live_candidate_20251028_201241.jsonl` - 83KB)
+
+**Usage**:
+```bash
+conda run -n sensequant python -m streamlit run dashboards/telemetry_dashboard.py -- --telemetry-dir data/analytics --refresh-interval 30
+```
+
+**Status**: ✅ **Training Telemetry Dashboard Active** - Ready for Batch 5 training monitoring
+
+**Session Completion**: 2025-10-28
+**Result**: Dashboard fully functional with training telemetry visualization

@@ -59,6 +59,7 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.services.accuracy_analyzer import AccuracyAnalyzer, AccuracyMetrics, PredictionTrace
+from src.services.training_telemetry import TrainingEvent
 
 
 def parse_args() -> argparse.Namespace:
@@ -131,6 +132,54 @@ def load_telemetry_data(telemetry_dir: str) -> tuple[list[PredictionTrace], list
     except Exception as e:
         logger.error(f"Failed to load telemetry data: {e}")
         return [], []
+
+
+@st.cache_data(ttl=30)
+def load_training_telemetry(telemetry_dir: str) -> dict[str, pd.DataFrame]:
+    """Load training telemetry from JSONL files (US-028 Phase 7).
+
+    Args:
+        telemetry_dir: Directory containing telemetry files
+
+    Returns:
+        Dictionary mapping run_id to DataFrame of training events
+    """
+    import json
+
+    telemetry_path = Path(telemetry_dir)
+    training_runs = {}
+
+    # Scan training subdirectory and root for training_run_*.jsonl
+    training_dirs = [telemetry_path / "training", telemetry_path]
+
+    for search_dir in training_dirs:
+        if not search_dir.exists():
+            continue
+
+        for jsonl_file in search_dir.glob("training_run_*.jsonl"):
+            try:
+                events = []
+                with open(jsonl_file) as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            event = json.loads(line)
+                            events.append(event)
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"Skipping invalid JSON line in {jsonl_file.name}: {e}")
+
+                if events:
+                    df = pd.DataFrame(events)
+                    run_id = events[0].get("run_id", jsonl_file.stem)
+                    training_runs[run_id] = df
+                    logger.info(f"Loaded {len(events)} events from {jsonl_file.name}")
+
+            except Exception as e:
+                logger.error(f"Failed to load {jsonl_file}: {e}")
+
+    return training_runs
 
 
 def is_live_mode(
@@ -808,6 +857,153 @@ def render_alerts(
         st.success("✅ All metrics within acceptable range")
 
 
+def render_training_telemetry_tab(telemetry_dir: str) -> None:
+    """Render training telemetry visualization tab (US-028 Phase 7).
+
+    Args:
+        telemetry_dir: Directory containing telemetry files
+    """
+    st.header("🎯 Training Telemetry")
+    st.markdown("Real-time monitoring of historical training runs")
+
+    # Load training runs
+    training_runs = load_training_telemetry(telemetry_dir)
+
+    if not training_runs:
+        st.info(
+            "No training telemetry found. Start a training run with --enable-telemetry to see data here."
+        )
+        return
+
+    # Run selector
+    run_ids = sorted(training_runs.keys(), reverse=True)
+    selected_run = st.selectbox("Select Training Run", run_ids, index=0)
+
+    df = training_runs[selected_run]
+
+    # Summary metrics
+    st.subheader("Run Summary")
+    summary_cols = st.columns(5)
+
+    with summary_cols[0]:
+        st.metric("Total Events", len(df))
+
+    with summary_cols[1]:
+        phases = df["phase"].dropna().unique()
+        st.metric("Phases", len(phases))
+
+    with summary_cols[2]:
+        symbols = df["symbol"].dropna().unique()
+        st.metric("Symbols", len(symbols))
+
+    with summary_cols[3]:
+        success_count = len(df[df["status"] == "success"])
+        st.metric("Successes", success_count)
+
+    with summary_cols[4]:
+        if "duration_seconds" in df.columns:
+            total_duration = df["duration_seconds"].dropna().sum()
+            st.metric("Total Duration", f"{total_duration / 60:.1f} min")
+        else:
+            st.metric("Total Duration", "N/A")
+
+    st.markdown("---")
+
+    # Phase progress table
+    st.subheader("Phase Progress")
+    phase_events = df[df["event_type"].str.contains("phase", na=False)]
+
+    if not phase_events.empty:
+        phase_summary = []
+        for phase in phases:
+            phase_df = df[df["phase"] == phase]
+            start_events = phase_df[phase_df["event_type"] == "phase_start"]
+            end_events = phase_df[phase_df["event_type"] == "phase_end"]
+
+            phase_summary.append(
+                {
+                    "Phase": phase.replace("_", " ").title() if phase else "Unknown",
+                    "Status": "Complete" if not end_events.empty else "In Progress",
+                    "Events": len(phase_df),
+                    "Duration (min)": (
+                        f"{end_events.iloc[0]['duration_seconds'] / 60:.1f}"
+                        if not end_events.empty and "duration_seconds" in end_events.columns
+                        else "N/A"
+                    ),
+                }
+            )
+
+        phase_df_display = pd.DataFrame(phase_summary)
+        st.dataframe(phase_df_display, use_container_width=True)
+    else:
+        st.info("No phase events available")
+
+    st.markdown("---")
+
+    # Per-symbol window stats (for teacher training)
+    st.subheader("Symbol Training Windows")
+    teacher_events = df[df["event_type"].str.contains("teacher_window", na=False)]
+
+    if not teacher_events.empty:
+        symbol_stats = []
+        for symbol in symbols:
+            symbol_df = teacher_events[teacher_events["symbol"] == symbol]
+            success = len(symbol_df[symbol_df["status"] == "success"])
+            skip = len(symbol_df[symbol_df["status"] == "skipped"])
+            fail = len(symbol_df[symbol_df["status"] == "failed"])
+
+            symbol_stats.append(
+                {
+                    "Symbol": symbol,
+                    "Success": success,
+                    "Skipped": skip,
+                    "Failed": fail,
+                    "Total": success + skip + fail,
+                    "Success %": f"{(success / (success + skip + fail) * 100):.1f}%" if (success + skip + fail) > 0 else "0%",
+                }
+            )
+
+        symbol_df_display = pd.DataFrame(symbol_stats)
+        st.dataframe(symbol_df_display, use_container_width=True, height=400)
+    else:
+        st.info("No teacher window events available")
+
+    st.markdown("---")
+
+    # Timeline chart
+    st.subheader("Event Timeline")
+
+    if not df.empty:
+        # Convert timestamp to datetime
+        df["timestamp_dt"] = pd.to_datetime(df["timestamp"])
+
+        # Create timeline chart
+        timeline_df = df[df["event_type"].isin(["teacher_window_success", "teacher_window_skip", "teacher_window_fail"])]
+
+        if not timeline_df.empty:
+            fig = px.scatter(
+                timeline_df,
+                x="timestamp_dt",
+                y="symbol",
+                color="status",
+                title="Training Window Events Over Time",
+                labels={"timestamp_dt": "Time", "symbol": "Symbol", "status": "Status"},
+                color_discrete_map={"success": "green", "skipped": "orange", "failed": "red"},
+            )
+            fig.update_layout(height=400)
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No timeline data available")
+
+    st.markdown("---")
+
+    # Raw events table (expandable)
+    with st.expander("📋 Raw Events (Last 50)", expanded=False):
+        display_cols = ["timestamp", "event_type", "phase", "symbol", "status", "message"]
+        available_cols = [col for col in display_cols if col in df.columns]
+        st.dataframe(df[available_cols].tail(50), use_container_width=True, height=400)
+
+
 def main() -> None:
     """Main dashboard application."""
     # Parse args
@@ -823,7 +1019,7 @@ def main() -> None:
 
     # Title
     st.title("📊 Strategy Telemetry Dashboard")
-    st.markdown("Real-time monitoring of trading strategy performance")
+    st.markdown("Real-time monitoring of trading strategy performance and training runs")
 
     # Sidebar
     with st.sidebar:
@@ -850,179 +1046,187 @@ def main() -> None:
             st.cache_data.clear()
             st.rerun()
 
-    # Load data
-    with st.spinner("Loading telemetry data..."):
-        intraday_traces, swing_traces = load_telemetry_data(telemetry_dir)
+    # Create tabs
+    tab1, tab2 = st.tabs(["📈 Backtest Telemetry", "🎯 Training Telemetry"])
 
-    # Compute metrics
-    intraday_metrics = compute_metrics_cached(intraday_traces)
-    swing_metrics = compute_metrics_cached(swing_traces)
+    # Tab 1: Backtest Telemetry
+    with tab1:
+        # Load data
+        with st.spinner("Loading telemetry data..."):
+            intraday_traces, swing_traces = load_telemetry_data(telemetry_dir)
 
-    # Check if data is available
-    if not intraday_traces and not swing_traces:
-        st.error(
-            f"No telemetry data found in {telemetry_dir}. "
-            "Please run a backtest with --enable-telemetry first."
-        )
-        return
+        # Compute metrics
+        intraday_metrics = compute_metrics_cached(intraday_traces)
+        swing_metrics = compute_metrics_cached(swing_traces)
 
-    # US-018 Phase 5: Live Mode Detection
-    all_traces = intraday_traces + swing_traces
-    is_live, last_update = is_live_mode(all_traces, threshold_minutes=5)
-
-    # Live Mode Indicator (US-018 Phase 5)
-    st.markdown("---")
-    live_col1, live_col2, live_col3 = st.columns([1, 2, 3])
-
-    with live_col1:
-        if is_live:
-            st.markdown("🟢 **LIVE MODE**")
+        # Check if data is available
+        if not intraday_traces and not swing_traces:
+            st.info(
+                f"No backtest telemetry found in {telemetry_dir}. "
+                "Run a backtest with --enable-telemetry to see data here."
+            )
         else:
-            st.markdown("⚪ **HISTORICAL**")
+            # US-018 Phase 5: Live Mode Detection
+            all_traces = intraday_traces + swing_traces
+            is_live, last_update = is_live_mode(all_traces, threshold_minutes=5)
 
-    with live_col2:
-        if last_update:
-            elapsed_minutes = int((datetime.now() - last_update).total_seconds() / 60)
-            st.markdown(f"**Last Update:** {last_update.strftime('%Y-%m-%d %H:%M:%S')}")
+            # Live Mode Indicator (US-018 Phase 5)
+            st.markdown("---")
+            live_col1, live_col2, live_col3 = st.columns([1, 2, 3])
 
-    with live_col3:
-        if last_update:
-            st.markdown(f"**Elapsed:** {elapsed_minutes} min ago")
+            with live_col1:
+                if is_live:
+                    st.markdown("🟢 **LIVE MODE**")
+                else:
+                    st.markdown("⚪ **HISTORICAL**")
 
-    st.markdown("---")
+            with live_col2:
+                if last_update:
+                    elapsed_minutes = int((datetime.now() - last_update).total_seconds() / 60)
+                    st.markdown(f"**Last Update:** {last_update.strftime('%Y-%m-%d %H:%M:%S')}")
 
-    # US-018 Phase 5: Rolling vs All-Time Metrics
-    st.header("Rolling Performance Analysis")
+            with live_col3:
+                if last_update:
+                    st.markdown(f"**Elapsed:** {elapsed_minutes} min ago")
 
-    # Compute rolling metrics for both strategies
-    intraday_rolling, intraday_alltime = compute_rolling_metrics(intraday_traces, window_size=100)
-    swing_rolling, swing_alltime = compute_rolling_metrics(swing_traces, window_size=100)
+            st.markdown("---")
 
-    # Display rolling comparison
-    st.subheader("Intraday: Rolling (last 100) vs All-Time")
-    if intraday_rolling and intraday_alltime:
-        rolling_cols = st.columns(4)
-        with rolling_cols[0]:
-            st.metric(
-                "Precision",
-                f"{intraday_rolling.precision.get('LONG', 0.0):.2%}",
-                delta=f"{(intraday_rolling.precision.get('LONG', 0.0) - intraday_alltime.precision.get('LONG', 0.0)):.2%}",
-            )
-        with rolling_cols[1]:
-            st.metric(
-                "Win Rate",
-                f"{intraday_rolling.win_rate:.2%}",
-                delta=f"{(intraday_rolling.win_rate - intraday_alltime.win_rate):.2%}",
-            )
-        with rolling_cols[2]:
-            st.metric(
-                "Sharpe",
-                f"{intraday_rolling.sharpe_ratio:.2f}",
-                delta=f"{(intraday_rolling.sharpe_ratio - intraday_alltime.sharpe_ratio):.2f}",
-            )
-        with rolling_cols[3]:
-            st.metric(
-                "Trades",
-                f"{len(intraday_traces[-100:]) if len(intraday_traces) > 100 else len(intraday_traces)}",
-                delta=f"of {intraday_alltime.total_trades}",
-            )
-    else:
-        st.info("Insufficient intraday data for rolling analysis")
+            # US-018 Phase 5: Rolling vs All-Time Metrics
+            st.header("Rolling Performance Analysis")
 
-    st.subheader("Swing: Rolling (last 100) vs All-Time")
-    if swing_rolling and swing_alltime:
-        rolling_cols = st.columns(4)
-        with rolling_cols[0]:
-            st.metric(
-                "Precision",
-                f"{swing_rolling.precision.get('LONG', 0.0):.2%}",
-                delta=f"{(swing_rolling.precision.get('LONG', 0.0) - swing_alltime.precision.get('LONG', 0.0)):.2%}",
-            )
-        with rolling_cols[1]:
-            st.metric(
-                "Win Rate",
-                f"{swing_rolling.win_rate:.2%}",
-                delta=f"{(swing_rolling.win_rate - swing_alltime.win_rate):.2%}",
-            )
-        with rolling_cols[2]:
-            st.metric(
-                "Sharpe",
-                f"{swing_rolling.sharpe_ratio:.2f}",
-                delta=f"{(swing_rolling.sharpe_ratio - swing_alltime.sharpe_ratio):.2f}",
-            )
-        with rolling_cols[3]:
-            st.metric(
-                "Trades",
-                f"{len(swing_traces[-100:]) if len(swing_traces) > 100 else len(swing_traces)}",
-                delta=f"of {swing_alltime.total_trades}",
-            )
-    else:
-        st.info("Insufficient swing data for rolling analysis")
+            # Compute rolling metrics for both strategies
+            intraday_rolling, intraday_alltime = compute_rolling_metrics(intraday_traces, window_size=100)
+            swing_rolling, swing_alltime = compute_rolling_metrics(swing_traces, window_size=100)
 
-    st.markdown("---")
+            # Display rolling comparison
+            st.subheader("Intraday: Rolling (last 100) vs All-Time")
+            if intraday_rolling and intraday_alltime:
+                rolling_cols = st.columns(4)
+                with rolling_cols[0]:
+                    st.metric(
+                        "Precision",
+                        f"{intraday_rolling.precision.get('LONG', 0.0):.2%}",
+                        delta=f"{(intraday_rolling.precision.get('LONG', 0.0) - intraday_alltime.precision.get('LONG', 0.0)):.2%}",
+                    )
+                with rolling_cols[1]:
+                    st.metric(
+                        "Win Rate",
+                        f"{intraday_rolling.win_rate:.2%}",
+                        delta=f"{(intraday_rolling.win_rate - intraday_alltime.win_rate):.2%}",
+                    )
+                with rolling_cols[2]:
+                    st.metric(
+                        "Sharpe",
+                        f"{intraday_rolling.sharpe_ratio:.2f}",
+                        delta=f"{(intraday_rolling.sharpe_ratio - intraday_alltime.sharpe_ratio):.2f}",
+                    )
+                with rolling_cols[3]:
+                    st.metric(
+                        "Trades",
+                        f"{len(intraday_traces[-100:]) if len(intraday_traces) > 100 else len(intraday_traces)}",
+                        delta=f"of {intraday_alltime.total_trades}",
+                    )
+            else:
+                st.info("Insufficient intraday data for rolling analysis")
 
-    # US-018 Phase 5: Metric Degradation Alerts
-    st.header("Degradation Alerts")
+            st.subheader("Swing: Rolling (last 100) vs All-Time")
+            if swing_rolling and swing_alltime:
+                rolling_cols = st.columns(4)
+                with rolling_cols[0]:
+                    st.metric(
+                        "Precision",
+                        f"{swing_rolling.precision.get('LONG', 0.0):.2%}",
+                        delta=f"{(swing_rolling.precision.get('LONG', 0.0) - swing_alltime.precision.get('LONG', 0.0)):.2%}",
+                    )
+                with rolling_cols[1]:
+                    st.metric(
+                        "Win Rate",
+                        f"{swing_rolling.win_rate:.2%}",
+                        delta=f"{(swing_rolling.win_rate - swing_alltime.win_rate):.2%}",
+                    )
+                with rolling_cols[2]:
+                    st.metric(
+                        "Sharpe",
+                        f"{swing_rolling.sharpe_ratio:.2f}",
+                        delta=f"{(swing_rolling.sharpe_ratio - swing_alltime.sharpe_ratio):.2f}",
+                    )
+                with rolling_cols[3]:
+                    st.metric(
+                        "Trades",
+                        f"{len(swing_traces[-100:]) if len(swing_traces) > 100 else len(swing_traces)}",
+                        delta=f"of {swing_alltime.total_trades}",
+                    )
+            else:
+                st.info("Insufficient swing data for rolling analysis")
 
-    degradation_alerts = []
+            st.markdown("---")
 
-    if intraday_rolling and intraday_alltime:
-        intraday_alerts = detect_metric_degradation(intraday_rolling, intraday_alltime)
-        for alert in intraday_alerts:
-            degradation_alerts.append(("Intraday", alert))
+            # US-018 Phase 5: Metric Degradation Alerts
+            st.header("Degradation Alerts")
 
-    if swing_rolling and swing_alltime:
-        swing_alerts = detect_metric_degradation(swing_rolling, swing_alltime)
-        for alert in swing_alerts:
-            degradation_alerts.append(("Swing", alert))
+            degradation_alerts = []
 
-    if degradation_alerts:
-        for strategy, alert_msg in degradation_alerts:
-            st.warning(f"**{strategy}:** {alert_msg}")
-    else:
-        st.success("✅ No metric degradation detected")
+            if intraday_rolling and intraday_alltime:
+                intraday_alerts = detect_metric_degradation(intraday_rolling, intraday_alltime)
+                for alert in intraday_alerts:
+                    degradation_alerts.append(("Intraday", alert))
 
-    st.markdown("---")
+            if swing_rolling and swing_alltime:
+                swing_alerts = detect_metric_degradation(swing_rolling, swing_alltime)
+                for alert in swing_alerts:
+                    degradation_alerts.append(("Swing", alert))
 
-    # Strategy Overview Cards
-    st.header("Strategy Overview")
-    card_cols = st.columns(2)
-    render_strategy_card("intraday", intraday_metrics, card_cols[0])
-    render_strategy_card("swing", swing_metrics, card_cols[1])
+            if degradation_alerts:
+                for strategy, alert_msg in degradation_alerts:
+                    st.warning(f"**{strategy}:** {alert_msg}")
+            else:
+                st.success("✅ No metric degradation detected")
 
-    st.markdown("---")
+            st.markdown("---")
 
-    # Cumulative Returns
-    st.header("Performance")
-    render_cumulative_returns(intraday_traces, swing_traces)
+            # Strategy Overview Cards
+            st.header("Strategy Overview")
+            card_cols = st.columns(2)
+            render_strategy_card("intraday", intraday_metrics, card_cols[0])
+            render_strategy_card("swing", swing_metrics, card_cols[1])
 
-    st.markdown("---")
+            st.markdown("---")
 
-    # Confusion Matrices
-    st.header("Prediction Accuracy")
-    matrix_cols = st.columns(2)
-    render_confusion_matrix("intraday", intraday_metrics, matrix_cols[0])
-    render_confusion_matrix("swing", swing_metrics, matrix_cols[1])
+            # Cumulative Returns
+            st.header("Performance")
+            render_cumulative_returns(intraday_traces, swing_traces)
 
-    st.markdown("---")
+            st.markdown("---")
 
-    # Alerts
-    st.header("Alerts & Monitoring")
-    render_alerts(intraday_metrics, swing_metrics, alert_threshold)
+            # Confusion Matrices
+            st.header("Prediction Accuracy")
+            matrix_cols = st.columns(2)
+            render_confusion_matrix("intraday", intraday_metrics, matrix_cols[0])
+            render_confusion_matrix("swing", swing_metrics, matrix_cols[1])
 
-    st.markdown("---")
+            st.markdown("---")
 
-    # US-021 Phase 3: Student Model Status
-    st.header("Student Model Monitoring")
-    student_status = load_student_monitoring_status()
-    render_student_model_status(student_status)
+            # Alerts
+            st.header("Alerts & Monitoring")
+            render_alerts(intraday_metrics, swing_metrics, alert_threshold)
 
-    st.markdown("---")
+            st.markdown("---")
 
-    # US-023: Active Release Panel
-    st.header("Release Deployment")
-    release_info = load_active_release()
-    render_active_release(release_info)
+            # US-021 Phase 3: Student Model Status
+            st.header("Student Model Monitoring")
+            student_status = load_student_monitoring_status()
+            render_student_model_status(student_status)
+
+            st.markdown("---")
+
+            # US-023: Active Release Panel
+            st.header("Release Deployment")
+            release_info = load_active_release()
+            render_active_release(release_info)
+
+    # Tab 2: Training Telemetry
+    with tab2:
+        render_training_telemetry_tab(telemetry_dir)
 
     # Auto-refresh
     if refresh_interval > 0:
