@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.app.config import Settings
 from src.services.state_manager import StateManager
+from src.services.training_telemetry import TrainingTelemetryLogger
 
 
 class HistoricalRunOrchestrator:
@@ -58,6 +59,8 @@ class HistoricalRunOrchestrator:
         skip_fetch: bool = False,
         dryrun: bool = False,
         run_stress_tests: bool | None = None,
+        enable_telemetry: bool = False,
+        telemetry_dir: Path | None = None,
     ):
         """Initialize orchestrator.
 
@@ -68,6 +71,8 @@ class HistoricalRunOrchestrator:
             skip_fetch: Skip data fetch phase
             dryrun: Dryrun mode (skip heavy computation)
             run_stress_tests: Enable Phase 8 stress tests (overrides config if provided)
+            enable_telemetry: Enable training telemetry capture
+            telemetry_dir: Directory for telemetry output (uses settings default if None)
         """
         self.symbols = symbols
         self.start_date = start_date
@@ -81,6 +86,10 @@ class HistoricalRunOrchestrator:
         # US-028 Phase 7 Initiative 3: Override stress tests setting if CLI flag provided
         if run_stress_tests is not None:
             self.settings.stress_tests_enabled = run_stress_tests
+
+        # US-028 Phase 7 Batch 4: Telemetry support
+        self.enable_telemetry = enable_telemetry
+        self.telemetry_dir = telemetry_dir or Path(self.settings.telemetry_storage_path) / "training"
 
         # Generate run ID
         self.run_id = f"live_candidate_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -98,8 +107,22 @@ class HistoricalRunOrchestrator:
         self.model_dir.mkdir(parents=True, exist_ok=True)
         self.audit_dir.mkdir(parents=True, exist_ok=True)
 
+        # US-028 Phase 7 Batch 4: Create telemetry directory if enabled
+        if self.enable_telemetry:
+            self.telemetry_dir.mkdir(parents=True, exist_ok=True)
+
         # State manager
         self.state_mgr = StateManager()
+
+        # US-028 Phase 7 Batch 4: Initialize telemetry logger
+        self.telemetry: TrainingTelemetryLogger | None = None
+        if self.enable_telemetry:
+            self.telemetry = TrainingTelemetryLogger(
+                output_dir=self.telemetry_dir,
+                run_id=self.run_id,
+                buffer_size=50,
+                enabled=True,
+            )
 
         # Results
         self.results: dict[str, Any] = {
@@ -111,6 +134,8 @@ class HistoricalRunOrchestrator:
         }
 
         logger.info(f"Initialized HistoricalRunOrchestrator: {self.run_id}")
+        if self.enable_telemetry:
+            logger.info(f"Telemetry enabled: {self.telemetry_dir}")
 
     def run(self) -> bool:
         """Execute full historical training pipeline.
@@ -122,6 +147,16 @@ class HistoricalRunOrchestrator:
         logger.info(f"  Historical Training Run: {self.run_id}")
         logger.info("=" * 70)
         logger.info("")
+
+        # US-028 Phase 7 Batch 4: Log run start
+        if self.telemetry:
+            self.telemetry.log_run_event(
+                event_type="run_start",
+                status="in_progress",
+                message=f"Starting historical training: {len(self.symbols)} symbols, {self.start_date} to {self.end_date}",
+            )
+
+        run_start_time = datetime.now()
 
         try:
             # Phase 1: Data Ingestion
@@ -167,6 +202,17 @@ class HistoricalRunOrchestrator:
             # Record candidate run in state manager
             self._record_candidate_run(status="ready-for-review")
 
+            # US-028 Phase 7 Batch 4: Log run end (success)
+            run_duration = (datetime.now() - run_start_time).total_seconds()
+            if self.telemetry:
+                self.telemetry.log_run_event(
+                    event_type="run_end",
+                    status="success",
+                    message="Historical training completed successfully",
+                    duration_seconds=run_duration,
+                )
+                self.telemetry.close()
+
             logger.info("=" * 70)
             logger.info("  Historical Run Complete")
             logger.info("=" * 70)
@@ -178,6 +224,8 @@ class HistoricalRunOrchestrator:
             logger.info(f"  - Model: {self.model_dir}")
             logger.info(f"  - Audit: {self.audit_dir}")
             logger.info(f"  - Briefing: {self.audit_dir / 'promotion_briefing.md'}")
+            if self.telemetry:
+                logger.info(f"  - Telemetry: {self.telemetry.output_file}")
             logger.info("")
             logger.info("Next Steps:")
             logger.info(f"  1. Review briefing: cat {self.audit_dir}/promotion_briefing.md")
@@ -191,6 +239,18 @@ class HistoricalRunOrchestrator:
 
         except Exception as e:
             logger.error(f"Historical run failed: {e}")
+
+            # US-028 Phase 7 Batch 4: Log run end (failure)
+            run_duration = (datetime.now() - run_start_time).total_seconds()
+            if self.telemetry:
+                self.telemetry.log_run_event(
+                    event_type="run_end",
+                    status="failed",
+                    message=f"Historical training failed: {str(e)}",
+                    duration_seconds=run_duration,
+                )
+                self.telemetry.close()
+
             self._record_candidate_run(status="failed")
             return False
 
@@ -419,6 +479,108 @@ class HistoricalRunOrchestrator:
             logger.error(f"Failed to parse {json_path}: {e}")
             return None
 
+    def _emit_teacher_window_telemetry(self, stats: dict[str, Any]) -> None:
+        """Emit telemetry events for teacher window outcomes (US-028 Phase 7 Batch 4).
+
+        Args:
+            stats: Aggregated teacher training statistics from teacher_runs.json
+        """
+        if not self.telemetry:
+            return
+
+        # Emit success events
+        for window in stats.get("success_windows", []):
+            window_label = window.get("window_label", "unknown")
+            metrics = window.get("metrics", {})
+            sample_counts = window.get("sample_counts", {})
+
+            # Extract symbol from window label (format: SYMBOL_2022Q1_intraday)
+            symbol = window_label.split("_")[0] if "_" in window_label else "unknown"
+
+            self.telemetry.log_teacher_window(
+                symbol=symbol,
+                window_label=window_label,
+                event_type="teacher_window_success",
+                status="success",
+                metrics={
+                    **metrics,
+                    **sample_counts,
+                },
+                message=f"Window trained successfully",
+            )
+
+        # Emit skip events
+        for window in stats.get("skipped_windows", []):
+            window_label = window.get("window_label", "unknown")
+            reason = window.get("reason", "Unknown")
+            symbol = window_label.split("_")[0] if "_" in window_label else "unknown"
+
+            self.telemetry.log_teacher_window(
+                symbol=symbol,
+                window_label=window_label,
+                event_type="teacher_window_skip",
+                status="skipped",
+                message=reason,
+                metrics=window.get("sample_counts"),
+            )
+
+        # Emit fail events
+        for window in stats.get("failed_windows", []):
+            window_label = window.get("window_label", "unknown")
+            error = window.get("error", "Unknown error")
+            symbol = window_label.split("_")[0] if "_" in window_label else "unknown"
+
+            self.telemetry.log_teacher_window(
+                symbol=symbol,
+                window_label=window_label,
+                event_type="teacher_window_fail",
+                status="failed",
+                message=error,
+            )
+
+        logger.info(
+            f"    ✓ Emitted telemetry for {len(stats.get('success_windows', []))} success, "
+            f"{len(stats.get('skipped_windows', []))} skipped, {len(stats.get('failed_windows', []))} failed windows"
+        )
+
+    def _load_student_metrics_for_telemetry(self) -> dict[str, Any]:
+        """Load student metrics from student_runs.json for telemetry (US-028 Phase 7 Batch 4).
+
+        Returns:
+            Dict with student metrics (accuracy, precision, recall, total_samples, etc.)
+        """
+        if not self.batch_dir:
+            return {}
+
+        json_path = self.batch_dir / "student_runs.json"
+        if not json_path.exists():
+            logger.debug(f"student_runs.json not found at {json_path}")
+            return {}
+
+        try:
+            with open(json_path) as f:
+                # Student runs JSON is a single object (not JSONL)
+                content = f.read().strip()
+                if not content:
+                    return {}
+
+                run_data = json.loads(content)
+
+            metrics = run_data.get("metrics", {})
+            total_samples = run_data.get("total_samples", 0)
+
+            return {
+                "total_samples": total_samples,
+                "accuracy": metrics.get("accuracy", 0.0),
+                "precision": metrics.get("precision", 0.0),
+                "recall": metrics.get("recall", 0.0),
+                "f1": metrics.get("f1", 0.0),
+            }
+
+        except Exception as e:
+            logger.error(f"Failed to load student metrics from {json_path}: {e}")
+            return {}
+
     def _extract_reward_metrics_from_student_runs(self) -> dict[str, float] | None:
         """Extract and aggregate reward metrics from student_runs.json.
 
@@ -480,6 +642,16 @@ class HistoricalRunOrchestrator:
     def _run_phase_2_teacher_training(self) -> bool:
         """Phase 2: Teacher Training."""
         logger.info("Phase 2/7: Teacher Training")
+
+        # US-028 Phase 7 Batch 4: Log phase start
+        phase_start_time = datetime.now()
+        if self.telemetry:
+            self.telemetry.log_phase_event(
+                phase="teacher_training",
+                event_type="phase_start",
+                status="in_progress",
+                message="Starting teacher training phase",
+            )
 
         if self.dryrun:
             logger.info("  [DRYRUN] Skipping teacher training")
@@ -577,6 +749,10 @@ class HistoricalRunOrchestrator:
                 f"skipped {stats['skipped']}, failed {stats['failed']}"
             )
 
+            # US-028 Phase 7 Batch 4: Emit telemetry for each teacher window
+            if self.telemetry and stats:
+                self._emit_teacher_window_telemetry(stats)
+
             logger.info("  ✓ Teacher training complete")
             logger.info("  ✓ Recorded teacher_runs.json")
 
@@ -597,6 +773,25 @@ class HistoricalRunOrchestrator:
                 f"trained={stats['completed']}, skipped={stats['skipped']}, failed={stats['failed']}"
             )
 
+            # US-028 Phase 7 Batch 4: Log phase end
+            phase_duration = (datetime.now() - phase_start_time).total_seconds()
+            if self.telemetry:
+                self.telemetry.log_phase_event(
+                    phase="teacher_training",
+                    event_type="phase_end",
+                    status="success" if stats["failed"] == 0 else "partial",
+                    metrics={
+                        "total_windows": stats["total_windows"],
+                        "completed": stats["completed"],
+                        "skipped": stats["skipped"],
+                        "failed": stats["failed"],
+                        "total_train_samples": stats.get("total_train_samples", 0),
+                        "total_val_samples": stats.get("total_val_samples", 0),
+                    },
+                    message=f"Teacher training complete: {stats['completed']}/{stats['total_windows']} windows",
+                    duration_seconds=phase_duration,
+                )
+
             self.results["phases"]["teacher_training"] = {
                 "status": "success" if stats["failed"] == 0 else "partial",
                 "total_windows": stats["total_windows"],
@@ -615,12 +810,34 @@ class HistoricalRunOrchestrator:
 
         except Exception as e:
             logger.error(f"  ✗ Teacher training failed: {e}")
+
+            # US-028 Phase 7 Batch 4: Log phase end (failure)
+            phase_duration = (datetime.now() - phase_start_time).total_seconds()
+            if self.telemetry:
+                self.telemetry.log_phase_event(
+                    phase="teacher_training",
+                    event_type="phase_end",
+                    status="failed",
+                    message=f"Teacher training failed: {str(e)}",
+                    duration_seconds=phase_duration,
+                )
+
             self.results["phases"]["teacher_training"] = {"status": "failed", "error": str(e)}
             return False
 
     def _run_phase_3_student_training(self) -> bool:
         """Phase 3: Student Training."""
         logger.info("Phase 3/7: Student Training")
+
+        # US-028 Phase 7 Batch 4: Log phase start
+        phase_start_time = datetime.now()
+        if self.telemetry:
+            self.telemetry.log_phase_event(
+                phase="student_training",
+                event_type="phase_start",
+                status="in_progress",
+                message="Starting student training phase",
+            )
 
         if self.dryrun:
             logger.info("  [DRYRUN] Skipping student training")
@@ -658,6 +875,19 @@ class HistoricalRunOrchestrator:
             # US-028 Phase 7 Initiative 2: Extract reward metrics from student_runs.json
             reward_metrics_summary = self._extract_reward_metrics_from_student_runs()
 
+            # US-028 Phase 7 Batch 4: Emit student training telemetry
+            if self.telemetry:
+                student_metrics = self._load_student_metrics_for_telemetry()
+                self.telemetry.log_student_metrics(
+                    event_type="student_batch_end",
+                    status="success",
+                    metrics={
+                        **student_metrics,
+                        **(reward_metrics_summary or {}),
+                    },
+                    message="Student training completed successfully",
+                )
+
             # US-028 Phase 7 Initiative 4: Record progress with reward metrics
             # Note: Student training completes all batches in one run
             progress_extra = {
@@ -681,6 +911,21 @@ class HistoricalRunOrchestrator:
             )
             logger.info("  [Progress] Phase 3 complete: student models trained")
 
+            # US-028 Phase 7 Batch 4: Log phase end
+            phase_duration = (datetime.now() - phase_start_time).total_seconds()
+            if self.telemetry:
+                self.telemetry.log_phase_event(
+                    phase="student_training",
+                    event_type="phase_end",
+                    status="success",
+                    metrics={
+                        "samples": 25000,
+                        **(reward_metrics_summary or {}),
+                    },
+                    message="Student training completed successfully",
+                    duration_seconds=phase_duration,
+                )
+
             self.results["phases"]["student_training"] = {
                 "status": "success",
                 "samples": 25000,
@@ -691,12 +936,34 @@ class HistoricalRunOrchestrator:
 
         except Exception as e:
             logger.error(f"  ✗ Student training failed: {e}")
+
+            # US-028 Phase 7 Batch 4: Log phase end (failure)
+            phase_duration = (datetime.now() - phase_start_time).total_seconds()
+            if self.telemetry:
+                self.telemetry.log_phase_event(
+                    phase="student_training",
+                    event_type="phase_end",
+                    status="failed",
+                    message=f"Student training failed: {str(e)}",
+                    duration_seconds=phase_duration,
+                )
+
             self.results["phases"]["student_training"] = {"status": "failed", "error": str(e)}
             return False
 
     def _run_phase_4_model_validation(self) -> bool:
         """Phase 4: Model Validation."""
         logger.info("Phase 4/7: Model Validation")
+
+        # US-028 Phase 7 Batch 4: Log phase start
+        phase_start_time = datetime.now()
+        if self.telemetry:
+            self.telemetry.log_phase_event(
+                phase="model_validation",
+                event_type="phase_start",
+                status="in_progress",
+                message="Starting model validation phase",
+            )
 
         if self.dryrun:
             logger.info("  [DRYRUN] Skipping validation")
@@ -755,6 +1022,26 @@ class HistoricalRunOrchestrator:
             logger.info("  ✓ Validation passed")
             logger.info("  ✓ Generated reports")
 
+            # US-028 Phase 7 Batch 4: Emit validation telemetry
+            phase_duration = (datetime.now() - phase_start_time).total_seconds()
+            if self.telemetry:
+                self.telemetry.log_validation_complete(
+                    status="success",
+                    metrics={
+                        "validation_passed": True,
+                        "validation_run_id": validation_run_id,
+                    },
+                    message="Model validation completed successfully",
+                )
+                self.telemetry.log_phase_event(
+                    phase="model_validation",
+                    event_type="phase_end",
+                    status="success",
+                    metrics={"validation_run_id": validation_run_id},
+                    message="Model validation phase completed",
+                    duration_seconds=phase_duration,
+                )
+
             self.results["phases"]["model_validation"] = {
                 "status": "success",
                 "validation_passed": True,
@@ -765,6 +1052,22 @@ class HistoricalRunOrchestrator:
 
         except Exception as e:
             logger.error(f"  ✗ Model validation failed: {e}")
+
+            # US-028 Phase 7 Batch 4: Log phase end (failure)
+            phase_duration = (datetime.now() - phase_start_time).total_seconds()
+            if self.telemetry:
+                self.telemetry.log_validation_complete(
+                    status="failed",
+                    message=f"Model validation failed: {str(e)}",
+                )
+                self.telemetry.log_phase_event(
+                    phase="model_validation",
+                    event_type="phase_end",
+                    status="failed",
+                    message=f"Model validation failed: {str(e)}",
+                    duration_seconds=phase_duration,
+                )
+
             self.results["phases"]["model_validation"] = {"status": "failed", "error": str(e)}
             return False
 
@@ -776,6 +1079,16 @@ class HistoricalRunOrchestrator:
         hypothesis tests, Sharpe comparison, benchmark comparison).
         """
         logger.info("Phase 5/7: Statistical Tests")
+
+        # US-028 Phase 7 Batch 4: Log phase start
+        phase_start_time = datetime.now()
+        if self.telemetry:
+            self.telemetry.log_phase_event(
+                phase="statistical_tests",
+                event_type="phase_start",
+                status="in_progress",
+                message="Starting statistical tests phase",
+            )
 
         if self.dryrun:
             logger.info("  [DRYRUN] Skipping statistical tests")
@@ -836,6 +1149,26 @@ class HistoricalRunOrchestrator:
             logger.info("  ✓ All tests passed")
             logger.info("  ✓ Stored stat_tests.json")
 
+            # US-028 Phase 7 Batch 4: Emit stat test telemetry
+            phase_duration = (datetime.now() - phase_start_time).total_seconds()
+            if self.telemetry:
+                self.telemetry.log_stat_test_complete(
+                    status="success",
+                    metrics={
+                        "tests_passed": True,
+                        "validation_run_id": validation_run_id,
+                    },
+                    message="Statistical tests completed successfully",
+                )
+                self.telemetry.log_phase_event(
+                    phase="statistical_tests",
+                    event_type="phase_end",
+                    status="success",
+                    metrics={"validation_run_id": validation_run_id},
+                    message="Statistical tests phase completed",
+                    duration_seconds=phase_duration,
+                )
+
             self.results["phases"]["statistical_tests"] = {
                 "status": "success",
                 "validation_run_id": validation_run_id,
@@ -846,12 +1179,38 @@ class HistoricalRunOrchestrator:
 
         except Exception as e:
             logger.error(f"  ✗ Statistical tests failed: {e}")
+
+            # US-028 Phase 7 Batch 4: Log phase end (failure)
+            phase_duration = (datetime.now() - phase_start_time).total_seconds()
+            if self.telemetry:
+                self.telemetry.log_stat_test_complete(
+                    status="failed",
+                    message=f"Statistical tests failed: {str(e)}",
+                )
+                self.telemetry.log_phase_event(
+                    phase="statistical_tests",
+                    event_type="phase_end",
+                    status="failed",
+                    message=f"Statistical tests failed: {str(e)}",
+                    duration_seconds=phase_duration,
+                )
+
             self.results["phases"]["statistical_tests"] = {"status": "failed", "error": str(e)}
             return False
 
     def _run_phase_6_release_audit(self) -> bool:
         """Phase 6: Release Audit."""
         logger.info("Phase 6/7: Release Audit")
+
+        # US-028 Phase 7 Batch 4: Log phase start
+        phase_start_time = datetime.now()
+        if self.telemetry:
+            self.telemetry.log_phase_event(
+                phase="release_audit",
+                event_type="phase_start",
+                status="in_progress",
+                message="Starting release audit phase",
+            )
 
         if self.dryrun:
             logger.info("  [DRYRUN] Skipping release audit")
@@ -920,10 +1279,40 @@ class HistoricalRunOrchestrator:
 
             logger.info("  ✓ Audit bundle created")
             logger.info("  ✓ Manifest generated")
+
+            # US-028 Phase 7 Batch 4: Emit audit telemetry
+            phase_duration = (datetime.now() - phase_start_time).total_seconds()
+            if self.telemetry:
+                audit_status = self.results["phases"]["release_audit"]["status"]
+                warnings = self.results["phases"]["release_audit"].get("warnings")
+                self.telemetry.log_phase_event(
+                    phase="release_audit",
+                    event_type="phase_end",
+                    status=audit_status,
+                    metrics={
+                        "exit_code": self.results["phases"]["release_audit"]["exit_code"],
+                        "audit_dir": str(self.audit_dir),
+                    },
+                    message=warnings if warnings else "Release audit completed",
+                    duration_seconds=phase_duration,
+                )
+
             return True
 
         except Exception as e:
             logger.error(f"  ✗ Release audit failed: {e}")
+
+            # US-028 Phase 7 Batch 4: Log phase end (failure)
+            phase_duration = (datetime.now() - phase_start_time).total_seconds()
+            if self.telemetry:
+                self.telemetry.log_phase_event(
+                    phase="release_audit",
+                    event_type="phase_end",
+                    status="failed",
+                    message=f"Release audit failed: {str(e)}",
+                    duration_seconds=phase_duration,
+                )
+
             self.results["phases"]["release_audit"] = {"status": "failed", "error": str(e)}
             return False
 
@@ -931,6 +1320,16 @@ class HistoricalRunOrchestrator:
         """Phase 7: Promotion Briefing."""
         phase_num = "7/8" if self.settings.stress_tests_enabled else "7/7"
         logger.info(f"Phase {phase_num}: Promotion Briefing")
+
+        # US-028 Phase 7 Batch 4: Log phase start
+        phase_start_time = datetime.now()
+        if self.telemetry:
+            self.telemetry.log_phase_event(
+                phase="promotion_briefing",
+                event_type="phase_start",
+                status="in_progress",
+                message="Starting promotion briefing generation",
+            )
 
         try:
             logger.info("  → Generating briefing...")
@@ -940,6 +1339,18 @@ class HistoricalRunOrchestrator:
 
             logger.info("  ✓ Briefing generated")
 
+            # US-028 Phase 7 Batch 4: Emit briefing telemetry
+            phase_duration = (datetime.now() - phase_start_time).total_seconds()
+            if self.telemetry:
+                self.telemetry.log_phase_event(
+                    phase="promotion_briefing",
+                    event_type="phase_end",
+                    status="success",
+                    metrics={"briefing_path": str(self.audit_dir / "promotion_briefing.md")},
+                    message="Promotion briefing generated successfully",
+                    duration_seconds=phase_duration,
+                )
+
             self.results["phases"]["promotion_briefing"] = {
                 "status": "success",
                 "briefing": str(self.audit_dir / "promotion_briefing.md"),
@@ -948,6 +1359,18 @@ class HistoricalRunOrchestrator:
 
         except Exception as e:
             logger.error(f"  ✗ Promotion briefing failed: {e}")
+
+            # US-028 Phase 7 Batch 4: Log phase end (failure)
+            phase_duration = (datetime.now() - phase_start_time).total_seconds()
+            if self.telemetry:
+                self.telemetry.log_phase_event(
+                    phase="promotion_briefing",
+                    event_type="phase_end",
+                    status="failed",
+                    message=f"Promotion briefing failed: {str(e)}",
+                    duration_seconds=phase_duration,
+                )
+
             self.results["phases"]["promotion_briefing"] = {"status": "failed", "error": str(e)}
             return False
 
@@ -1538,6 +1961,18 @@ def main() -> None:
         help="Enable Phase 8 stress tests against historical crisis periods (US-028 Phase 7 Initiative 3)",
     )
 
+    parser.add_argument(
+        "--enable-telemetry",
+        action="store_true",
+        help="Enable training telemetry capture for dashboard monitoring (US-028 Phase 7 Batch 4)",
+    )
+
+    parser.add_argument(
+        "--telemetry-dir",
+        type=str,
+        help="Directory for telemetry output (default: data/analytics/training)",
+    )
+
     args = parser.parse_args()
 
     # US-028 Phase 7 Initiative 1: Support --symbols-mode
@@ -1587,6 +2022,8 @@ def main() -> None:
         skip_fetch=args.skip_fetch,
         dryrun=args.dryrun,
         run_stress_tests=args.run_stress_tests,  # US-028 Phase 7 Initiative 3
+        enable_telemetry=args.enable_telemetry,  # US-028 Phase 7 Batch 4
+        telemetry_dir=Path(args.telemetry_dir) if args.telemetry_dir else None,
     )
 
     # Execute pipeline
