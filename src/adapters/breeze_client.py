@@ -298,52 +298,10 @@ class BreezeClient:
         """
         if self.dry_run:
             logger.info(
-                "DRYRUN: Loading historical_bars from cached data",
+                "DRYRUN: historical_bars (cached)",
                 extra={"component": "breeze", "symbol": symbol, "interval": interval},
             )
-            # Load from data/historical/{symbol}/{interval}/*.csv
-            from pathlib import Path
-            import glob
-
-            data_dir = Path("data/historical") / symbol / interval
-            if not data_dir.exists():
-                logger.warning(
-                    f"No cached data found at {data_dir}",
-                    extra={"component": "breeze", "symbol": symbol, "interval": interval},
-                )
-                return []
-
-            # Load all CSV files in the directory
-            csv_files = sorted(glob.glob(str(data_dir / "*.csv")))
-            if not csv_files:
-                logger.warning(
-                    f"No CSV files found in {data_dir}",
-                    extra={"component": "breeze", "symbol": symbol, "interval": interval},
-                )
-                return []
-
-            bars = []
-            for csv_file in csv_files:
-                df = pd.read_csv(csv_file)
-                # Convert to Bar objects
-                for _, row in df.iterrows():
-                    ts = pd.Timestamp(row['timestamp'], tz='Asia/Kolkata')
-                    # Filter by date range
-                    if start <= ts <= end:
-                        bars.append(Bar(
-                            ts=ts,
-                            open=float(row['open']),
-                            high=float(row['high']),
-                            low=float(row['low']),
-                            close=float(row['close']),
-                            volume=int(row['volume']),
-                        ))
-
-            logger.info(
-                f"Loaded {len(bars)} bars from cached data",
-                extra={"component": "breeze", "symbol": symbol, "interval": interval, "bars": len(bars)},
-            )
-            return bars
+            return self._load_cached_bars(symbol, interval, start, end)
 
         # Map NSE exchange code to ISEC stock code
         # Load mappings from symbol_mappings.json (e.g., RELIANCE→RELIND, INFY→INFTEC)
@@ -704,6 +662,66 @@ class BreezeClient:
             logger.warning(
                 "Rate limit exceeded, using default backoff", extra={"component": "breeze"}
             )
+
+    def _load_cached_bars(
+        self,
+        symbol: str,
+        interval: Literal["1minute", "5minute", "1day"],
+        start: pd.Timestamp,
+        end: pd.Timestamp,
+    ) -> list[Bar]:
+        """
+        Load historical bars from cached CSV files (dry-run mode).
+
+        Args:
+            symbol: Stock symbol (e.g., "RELIANCE")
+            interval: Bar interval
+            start: Start datetime (timezone-aware)
+            end: End datetime (timezone-aware)
+
+        Returns:
+            List of Bar objects with IST timezone-aware timestamps
+        """
+        import glob
+
+        data_dir = Path("data/historical") / symbol / interval
+        if not data_dir.exists():
+            logger.warning(
+                f"No cached data found at {data_dir}",
+                extra={"component": "breeze", "symbol": symbol, "interval": interval},
+            )
+            return []
+
+        csv_files = sorted(glob.glob(str(data_dir / "*.csv")))
+        if not csv_files:
+            logger.warning(
+                f"No CSV files found in {data_dir}",
+                extra={"component": "breeze", "symbol": symbol, "interval": interval},
+            )
+            return []
+
+        bars = []
+        for csv_file in csv_files:
+            df = pd.read_csv(csv_file)
+            for _, row in df.iterrows():
+                ts = pd.Timestamp(row["timestamp"], tz="Asia/Kolkata")
+                if start <= ts <= end:
+                    bars.append(
+                        Bar(
+                            ts=ts,
+                            open=float(row["open"]),
+                            high=float(row["high"]),
+                            low=float(row["low"]),
+                            close=float(row["close"]),
+                            volume=int(row["volume"]),
+                        )
+                    )
+
+        logger.info(
+            f"Loaded {len(bars)} bars from cached data",
+            extra={"component": "breeze", "symbol": symbol, "interval": interval, "bars": len(bars)},
+        )
+        return bars
 
     def _normalize_bars(
         self, payload: dict[str, Any] | list[Any], symbol: str, interval: str
