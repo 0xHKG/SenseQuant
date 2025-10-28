@@ -1,0 +1,316 @@
+{
+  "last_updated": "2025-10-15",
+  "source": "Breeze API get_names() method",
+  "discovery_stats": {
+    "total_symbols": 34,
+    "success_count": 34,
+    "error_count": 0,
+    "mappings_found": 30
+  },
+  "mappings": {
+    "LT": "LARTOU",
+    "ADANIPORTS": "ADAPOR",
+    "LICI": "LIC",
+    "BAJAJFINSV": "BAFINS",
+    "INDUSINDBK": "INDBA",
+    "PNB": "PUNBAN",
+    "BANKBARODA": "BANBAR",
+    "CANBK": "CANBAN",
+    "ASIANPAINT": "ASIPAI",
+    "COALINDIA": "COALIN",
+    "HEROMOTOCO": "HERHON",
+    "EICHERMOT": "EICMOT",
+    "TVSMOTOR": "TVSMOT",
+    "BAJAJ-AUTO": "BAAUTO",
+    "MOTHERSON": "MOTSUM",
+    "JSWSTEEL": "JSWSTE",
+    "TITAN": "TITIND",
+    "MPHASIS": "MPHLIM",
+    "PERSISTENT": "PERSYS",
+    "COFORGE": "NIITEC",
+    "DIVISLAB": "DIVLAB",
+    "AUROPHARMA": "AURPHA",
+    "IOC": "INDOIL",
+    "BPCL": "BHAPET",
+    "MARICO": "MARLIM",
+    "GODREJCP": "GODCON",
+    "ADANIGREEN": "ADAGRE",
+    "IDEA": "IDECEL",
+    "APLAPOLLO": "APLAPO",
+    "DIXON": "DIXTEC"
+  },
+  "symbol_details": [
+    {
+      "nse_symbol": "LT",
+      "isec_code": "LARTOU",
+      "isec_token": "11483",
+      "company_name": "LARSEN AND TOUBRO LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "ADANIPORTS",
+      "isec_code": "ADAPOR",
+      "isec_token": "15083",
+      "company_name": "ADANI PORT AND SPECIAL ECONO",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "LICI",
+      "isec_code": "LIC",
+      "isec_token": "9480",
+      "company_name": "LIFE INSURANCE CORP OF IND LIC",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "BAJAJFINSV",
+      "isec_code": "BAFINS",
+      "isec_token": "16675",
+      "company_name": "BAJAJ FINSERV LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "INDUSINDBK",
+      "isec_code": "INDBA",
+      "isec_token": "5258",
+      "company_name": "INDUSIND BANK LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "PNB",
+      "isec_code": "PUNBAN",
+      "isec_token": "10666",
+      "company_name": "PUNJAB NATIONAL BANK",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "BANKBARODA",
+      "isec_code": "BANBAR",
+      "isec_token": "4668",
+      "company_name": "BANK OF BARODA",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "CANBK",
+      "isec_code": "CANBAN",
+      "isec_token": "10794",
+      "company_name": "CANARA BANK",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "ASIANPAINT",
+      "isec_code": "ASIPAI",
+      "isec_token": "236",
+      "company_name": "ASIAN PAINTS INDIA LTD",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "COALINDIA",
+      "isec_code": "COALIN",
+      "isec_token": "20374",
+      "company_name": "COAL INDIA LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "GRASIM",
+      "isec_code": "GRASIM",
+      "isec_token": "1232",
+      "company_name": "GRASIM INDUSTRIES LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "HEROMOTOCO",
+      "isec_code": "HERHON",
+      "isec_token": "1348",
+      "company_name": "HERO MOTOCORP LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "EICHERMOT",
+      "isec_code": "EICMOT",
+      "isec_token": "910",
+      "company_name": "EICHER MOTORS LTD",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "TVSMOTOR",
+      "isec_code": "TVSMOT",
+      "isec_token": "8479",
+      "company_name": "TVS MOTOR COMPANY LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "BAJAJ-AUTO",
+      "isec_code": "BAAUTO",
+      "isec_token": "16669",
+      "company_name": "BAJAJ AUTO LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "MOTHERSON",
+      "isec_code": "MOTSUM",
+      "isec_token": "4204",
+      "company_name": "SAMVARDHANA MOTHERSON INT LTD",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "JSWSTEEL",
+      "isec_code": "JSWSTE",
+      "isec_token": "11723",
+      "company_name": "JSW STEEL LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "TITAN",
+      "isec_code": "TITIND",
+      "isec_token": "3506",
+      "company_name": "TITAN COMPANY LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "MPHASIS",
+      "isec_code": "MPHLIM",
+      "isec_token": "4503",
+      "company_name": "MPHASIS LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "PERSISTENT",
+      "isec_code": "PERSYS",
+      "isec_token": "18365",
+      "company_name": "PERSISTENT SYSTEMS LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "COFORGE",
+      "isec_code": "NIITEC",
+      "isec_token": "11543",
+      "company_name": "COFORGE LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "DIVISLAB",
+      "isec_code": "DIVLAB",
+      "isec_token": "10940",
+      "company_name": "DIVIS LABORATORIES LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "BIOCON",
+      "isec_code": "BIOCON",
+      "isec_token": "11373",
+      "company_name": "BIOCON LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "LUPIN",
+      "isec_code": "LUPIN",
+      "isec_token": "10440",
+      "company_name": "LUPIN LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "AUROPHARMA",
+      "isec_code": "AURPHA",
+      "isec_token": "275",
+      "company_name": "AUROBINDO PHARMA LTD",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "IOC",
+      "isec_code": "INDOIL",
+      "isec_token": "1624",
+      "company_name": "INDIAN OIL CORPORATION LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "BPCL",
+      "isec_code": "BHAPET",
+      "isec_token": "526",
+      "company_name": "BHARAT PETROLEUM CORPN LTD",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "GAIL",
+      "isec_code": "GAIL",
+      "isec_token": "4717",
+      "company_name": "GAIL (INDIA) LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "MARICO",
+      "isec_code": "MARLIM",
+      "isec_token": "4067",
+      "company_name": "MARICO LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "GODREJCP",
+      "isec_code": "GODCON",
+      "isec_token": "10099",
+      "company_name": "GODREJ CONSUMER PRODUCTS LTD",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "ADANIGREEN",
+      "isec_code": "ADAGRE",
+      "isec_token": "3563",
+      "company_name": "ADANI GREEN ENERGY LTD",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "IDEA",
+      "isec_code": "IDECEL",
+      "isec_token": "14366",
+      "company_name": "VODAFONE IDEA LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "APLAPOLLO",
+      "isec_code": "APLAPO",
+      "isec_token": "25780",
+      "company_name": "APL APOLLO TUBES LIMITED",
+      "status": "success",
+      "error": null
+    },
+    {
+      "nse_symbol": "DIXON",
+      "isec_code": "DIXTEC",
+      "isec_token": "21690",
+      "company_name": "DIXON TECHNOLOGIES INDIA LTD",
+      "status": "success",
+      "error": null
+    }
+  ]
+}

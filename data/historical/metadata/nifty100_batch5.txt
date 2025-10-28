@@ -1,0 +1,63 @@
+# NIFTY100 Batch 5 - Remaining Unverified Symbols (30 symbols)
+# Date: 2025-10-28
+# Purpose: Complete NIFTY100 coverage with unverified symbols from Batch 3
+# Date Range: 2022-01-01 to 2024-12-31 (3 years)
+# Intervals: 1day, 5minute
+# Status: These symbols need Breeze/ISEC code verification
+
+# NOTE: Batches 1-4 already ingested (66 symbols with verified ISEC codes)
+# This batch contains:
+#   - 30 symbols from Batch 3 (ingested but status="nifty100", no ISEC codes verified yet)
+# Total: 30 symbols from official NIFTY 100 constituents (96 total in main symbols array)
+
+# Infrastructure & Engineering (2 symbols)
+LT
+ADANIPORTS
+
+# Financial Services (4 symbols)
+LICI
+BAJAJFINSV
+INDUSINDBK
+PNB
+
+# Banking (2 symbols)
+BANKBARODA
+CANBK
+
+# Industrials & Materials (3 symbols)
+ASIANPAINT
+COALINDIA
+GRASIM
+
+# Automotive (5 symbols)
+HEROMOTOCO
+EICHERMOT
+TVSMOTOR
+BAJAJ-AUTO
+MOTHERSON
+
+# Metals (1 symbol)
+JSWSTEEL
+
+# Consumer Goods (1 symbol)
+TITAN
+
+# IT Sector (3 symbols)
+MPHASIS
+PERSISTENT
+COFORGE
+
+# Pharmaceuticals (4 symbols)
+DIVISLAB
+BIOCON
+LUPIN
+AUROPHARMA
+
+# Energy (3 symbols)
+IOC
+BPCL
+GAIL
+
+# FMCG (2 symbols)
+MARICO
+GODREJCP
