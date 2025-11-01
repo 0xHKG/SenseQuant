@@ -162,59 +162,66 @@ class HistoricalRunOrchestrator:
         run_start_time = datetime.now()
 
         try:
-            # Phase 1: Data Ingestion
-            if not self._run_phase_1_data_ingestion():
-                return False
-
-            # Phase 2: Teacher Training
-            if not self._run_phase_2_teacher_training():
-                return False
-
-            # Phase 3: Student Training
-            if not self._run_phase_3_student_training():
-                return False
-
-            # Phase 4: Model Validation
-            if not self._run_phase_4_model_validation():
-                return False
-
-            # Phase 5: Statistical Tests
-            if not self._run_phase_5_statistical_tests():
-                return False
-
-            # Phase 6: Release Audit
-            if not self._run_phase_6_release_audit():
-                return False
-
-            # Phase 7: Promotion Briefing
-            if not self._run_phase_7_promotion_briefing():
-                return False
-
-            # Phase 8: Black-Swan Stress Tests (optional)
-            if self.settings.stress_tests_enabled:
-                if not self._run_phase_8_stress_tests():
+            # BUGFIX (2025-11-01): Wrap all phases in try/finally to ensure telemetry flush
+            # even when phases return False (early exit)
+            try:
+                # Phase 1: Data Ingestion
+                if not self._run_phase_1_data_ingestion():
                     return False
-            else:
-                logger.info("Phase 8: Stress Tests (skipped - not enabled)")
-                self.results["phases"]["stress_tests"] = {"status": "skipped", "reason": "not enabled"}
 
-            # Validate artifacts exist
-            if not self._validate_artifacts():
-                return False
+                # Phase 2: Teacher Training
+                if not self._run_phase_2_teacher_training():
+                    return False
 
-            # Record candidate run in state manager
-            self._record_candidate_run(status="ready-for-review")
+                # Phase 3: Student Training
+                if not self._run_phase_3_student_training():
+                    return False
 
-            # US-028 Phase 7 Batch 4: Log run end (success)
-            run_duration = (datetime.now() - run_start_time).total_seconds()
-            if self.telemetry:
-                self.telemetry.log_run_event(
-                    event_type="run_end",
-                    status="success",
-                    message="Historical training completed successfully",
-                    duration_seconds=run_duration,
-                )
-                self.telemetry.close()
+                # Phase 4: Model Validation
+                if not self._run_phase_4_model_validation():
+                    return False
+
+                # Phase 5: Statistical Tests
+                if not self._run_phase_5_statistical_tests():
+                    return False
+
+                # Phase 6: Release Audit
+                if not self._run_phase_6_release_audit():
+                    return False
+
+                # Phase 7: Promotion Briefing
+                if not self._run_phase_7_promotion_briefing():
+                    return False
+
+                # Phase 8: Black-Swan Stress Tests (optional)
+                if self.settings.stress_tests_enabled:
+                    if not self._run_phase_8_stress_tests():
+                        return False
+                else:
+                    logger.info("Phase 8: Stress Tests (skipped - not enabled)")
+                    self.results["phases"]["stress_tests"] = {"status": "skipped", "reason": "not enabled"}
+
+                # Validate artifacts exist
+                if not self._validate_artifacts():
+                    return False
+
+                # Record candidate run in state manager
+                self._record_candidate_run(status="ready-for-review")
+
+                # US-028 Phase 7 Batch 4: Log run end (success)
+                run_duration = (datetime.now() - run_start_time).total_seconds()
+                if self.telemetry:
+                    self.telemetry.log_run_event(
+                        event_type="run_end",
+                        status="success",
+                        message="Historical training completed successfully",
+                        duration_seconds=run_duration,
+                    )
+
+            finally:
+                # BUGFIX (2025-11-01): Always flush and close telemetry, even on early return
+                if self.telemetry:
+                    self.telemetry.close()
 
             logger.info("=" * 70)
             logger.info("  Historical Run Complete")
@@ -252,7 +259,7 @@ class HistoricalRunOrchestrator:
                     message=f"Historical training failed: {str(e)}",
                     duration_seconds=run_duration,
                 )
-                self.telemetry.close()
+                # BUGFIX (2025-11-01): close() moved to finally block to avoid double-close
 
             self._record_candidate_run(status="failed")
             return False
@@ -494,8 +501,9 @@ class HistoricalRunOrchestrator:
         # Emit success events
         for window in stats.get("success_windows", []):
             window_label = window.get("window_label", "unknown")
-            metrics = window.get("metrics", {})
-            sample_counts = window.get("sample_counts", {})
+            # BUGFIX (2025-11-01): Handle None metrics/sample_counts gracefully
+            metrics = window.get("metrics") or {}
+            sample_counts = window.get("sample_counts") or {}
 
             # Extract symbol from window label (format: SYMBOL_2022Q1_intraday)
             symbol = window_label.split("_")[0] if "_" in window_label else "unknown"
@@ -509,7 +517,7 @@ class HistoricalRunOrchestrator:
                     **metrics,
                     **sample_counts,
                 },
-                message=f"Window trained successfully",
+                message="Window trained successfully",
             )
 
         # Emit skip events
@@ -724,6 +732,8 @@ class HistoricalRunOrchestrator:
                 logger.warning(f"Batch directory does not exist: {batch_dir}")
 
             # US-028 Phase 6l: Fallback - Parse stdout if JSON aggregation failed
+            # BUGFIX (2025-11-01): Ensure stats is always a dict, never None
+            # Previous bug: stats could be None, causing TypeError at line 755
             if stats is None:
                 logger.warning(
                     "Failed to aggregate from teacher_runs.json, falling back to stdout parsing"
@@ -751,13 +761,15 @@ class HistoricalRunOrchestrator:
                     elif "Skipped:" in line:
                         stats["skipped"] = int(line.split(":")[1].strip())
 
+            # At this point, stats is guaranteed to be a dict (never None)
             logger.info(
                 f"    ✓ Trained {stats['completed']} windows, "
                 f"skipped {stats['skipped']}, failed {stats['failed']}"
             )
 
             # US-028 Phase 7 Batch 4: Emit telemetry for each teacher window
-            if self.telemetry and stats:
+            # BUGFIX (2025-11-01): stats is guaranteed to be a dict, so only check telemetry
+            if self.telemetry:
                 self._emit_teacher_window_telemetry(stats)
 
             logger.info("  ✓ Teacher training complete")
