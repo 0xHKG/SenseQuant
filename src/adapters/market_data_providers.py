@@ -188,9 +188,9 @@ class BreezeOrderBookProvider(MarketDataProvider):
             return self._mock_order_book(symbol, depth, exchange)
 
         try:
-            # Breeze API call: get_quotes includes order book depth
-            # Note: Breeze API may not support full order book depth;
-            # this is a placeholder for the actual implementation
+            # Breeze API call: get_quotes provides market depth
+            # The Breeze API returns top 5 bid/ask levels in the Success response
+            # Format: {"Success": [{"best_bid_price": X, "best_ask_price": Y, "depth": {...}}]}
             response = self.client._call_with_retry(  # type: ignore[union-attr]
                 "get_quotes",
                 stock_code=symbol,
@@ -198,10 +198,47 @@ class BreezeOrderBookProvider(MarketDataProvider):
                 product_type="cash",
             )
 
-            # Parse response (Breeze API structure may vary)
-            # This is a simplified example; actual parsing depends on API response format
-            bids = self._parse_order_book_side(response.get("Bids", []), depth)
-            asks = self._parse_order_book_side(response.get("Asks", []), depth)
+            # Parse Breeze API response
+            # Response structure: {"Success": [{"depth": {"buy": [...], "sell": [...]}}]}
+            if not response or "Success" not in response:
+                logger.warning(
+                    f"Invalid order book response for {symbol}",
+                    extra={"component": "order_book_provider", "response": response},
+                )
+                return self._mock_order_book(symbol, depth, exchange)
+
+            data = response["Success"]
+            if not data or not isinstance(data, list) or not data[0]:
+                logger.warning(
+                    f"Empty order book data for {symbol}",
+                    extra={"component": "order_book_provider"},
+                )
+                return self._mock_order_book(symbol, depth, exchange)
+
+            # Extract depth data from first element
+            quote_data = data[0]
+            depth_data = quote_data.get("depth", {})
+
+            # Parse bid and ask sides
+            # Breeze depth format: {"buy": [{"price": X, "quantity": Y, "orders": Z}], "sell": [...]}
+            raw_bids = depth_data.get("buy", [])
+            raw_asks = depth_data.get("sell", [])
+
+            bids = self._parse_order_book_side(raw_bids, depth)
+            asks = self._parse_order_book_side(raw_asks, depth)
+
+            # Enrich metadata with additional quote data
+            metadata = {
+                "depth_levels": depth,
+                "source": "breeze_live",
+                "fetch_time": datetime.now().isoformat(),
+                "best_bid": quote_data.get("best_bid_price"),
+                "best_ask": quote_data.get("best_ask_price"),
+                "ltp": quote_data.get("ltp"),
+                "volume": quote_data.get("volume"),
+                "total_buy_quantity": quote_data.get("total_buy_qty"),
+                "total_sell_quantity": quote_data.get("total_sell_qty"),
+            }
 
             snapshot = OrderBookSnapshot(
                 symbol=symbol,
@@ -209,11 +246,7 @@ class BreezeOrderBookProvider(MarketDataProvider):
                 exchange=exchange,
                 bids=bids,
                 asks=asks,
-                metadata={
-                    "depth_levels": depth,
-                    "source": "breeze",
-                    "fetch_time": datetime.now().isoformat(),
-                },
+                metadata=metadata,
             )
 
             logger.debug(
