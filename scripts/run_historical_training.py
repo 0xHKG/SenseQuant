@@ -61,6 +61,7 @@ class HistoricalRunOrchestrator:
         run_stress_tests: bool | None = None,
         enable_telemetry: bool = False,
         telemetry_dir: Path | None = None,
+        workers: int = 1,
     ):
         """Initialize orchestrator.
 
@@ -73,12 +74,14 @@ class HistoricalRunOrchestrator:
             run_stress_tests: Enable Phase 8 stress tests (overrides config if provided)
             enable_telemetry: Enable training telemetry capture
             telemetry_dir: Directory for telemetry output (uses settings default if None)
+            workers: Number of parallel workers for multi-GPU training (default: 1)
         """
         self.symbols = symbols
         self.start_date = start_date
         self.end_date = end_date
         self.skip_fetch = skip_fetch
         self.dryrun = dryrun
+        self.workers = workers
 
         # Load settings
         self.settings = Settings()  # type: ignore[call-arg]
@@ -668,8 +671,10 @@ class HistoricalRunOrchestrator:
 
             # Execute: train_teacher_batch.py
             # Note: Script uses settings.batch_training_output_dir for output
+            # Use python -u for unbuffered output to enable real-time progress monitoring
             teacher_cmd = [
                 "python",
+                "-u",  # Unbuffered output for real-time logs
                 str(self.repo_root / "scripts" / "train_teacher_batch.py"),
                 "--symbols",
                 *self.symbols,
@@ -677,6 +682,8 @@ class HistoricalRunOrchestrator:
                 self.start_date,
                 "--end-date",
                 self.end_date,
+                "--workers",
+                str(self.workers),
             ]
 
             logger.info(f"    Running: {' '.join(teacher_cmd)}")
@@ -855,8 +862,10 @@ class HistoricalRunOrchestrator:
             # Execute: train_student_batch.py
             # Note: Script auto-detects latest teacher batch from settings.batch_training_output_dir
             # and uses settings.student_training_output_dir for output
+            # Use python -u for unbuffered output
             student_cmd = [
                 "python",
+                "-u",  # Unbuffered output for real-time logs
                 str(self.repo_root / "scripts" / "train_student_batch.py"),
             ]
 
@@ -1973,6 +1982,13 @@ def main() -> None:
         help="Directory for telemetry output (default: data/analytics/training)",
     )
 
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Number of parallel workers for multi-GPU teacher training (default: 1)",
+    )
+
     args = parser.parse_args()
 
     # US-028 Phase 7 Initiative 1: Support --symbols-mode
@@ -2024,6 +2040,7 @@ def main() -> None:
         run_stress_tests=args.run_stress_tests,  # US-028 Phase 7 Initiative 3
         enable_telemetry=args.enable_telemetry,  # US-028 Phase 7 Batch 4
         telemetry_dir=Path(args.telemetry_dir) if args.telemetry_dir else None,
+        workers=args.workers,  # US-028 Phase 7 Batch 5: Multi-GPU support
     )
 
     # Execute pipeline

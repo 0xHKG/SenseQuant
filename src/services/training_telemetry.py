@@ -76,7 +76,7 @@ class TrainingTelemetryLogger:
         self,
         output_dir: Path,
         run_id: str,
-        buffer_size: int = 50,
+        buffer_size: int = 10,
         enabled: bool = True,
     ):
         """Initialize training telemetry logger.
@@ -84,7 +84,7 @@ class TrainingTelemetryLogger:
         Args:
             output_dir: Directory for telemetry output (e.g., data/analytics/training/)
             run_id: Training run identifier
-            buffer_size: Number of events to buffer before flushing (default: 50)
+            buffer_size: Number of events to buffer before flushing (default: 10, reduced for real-time monitoring)
             enabled: Enable/disable telemetry (default: True)
         """
         self.output_dir = Path(output_dir)
@@ -306,16 +306,19 @@ class TrainingTelemetryLogger:
         self.log_event(event)
 
     def flush(self) -> None:
-        """Flush buffered events to disk."""
+        """Flush buffered events to disk with immediate write-through."""
         if not self.enabled or not self._buffer:
             return
 
         try:
-            # Append all buffered events to file as JSONL
-            with open(self.output_file, "a") as f:
+            # Append all buffered events to file as JSONL with explicit flush
+            # Use buffering=1 for line buffering to ensure immediate writes
+            with open(self.output_file, "a", buffering=1) as f:
                 for event in self._buffer:
                     json_line = json.dumps(event.to_dict())
                     f.write(json_line + "\n")
+                # Explicit flush to ensure data reaches disk immediately
+                f.flush()
 
             logger.debug(
                 f"Flushed {len(self._buffer)} telemetry events to {self.output_file}",
