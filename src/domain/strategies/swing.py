@@ -17,6 +17,11 @@ from src.domain.features import (
     calculate_rsi,
     calculate_sma,
 )
+from src.domain.support_resistance import (
+    calculate_52week_levels,
+    calculate_anchored_vwap,
+    calculate_swing_highs_lows,
+)
 from src.domain.types import Signal, SignalDirection
 
 
@@ -42,7 +47,14 @@ def compute_features(df: pd.DataFrame, settings: Settings) -> pd.DataFrame:
     """
     Compute technical indicators for swing strategy (daily bars).
 
-    Adds columns: sma_fast, sma_slow, rsi, ema20, atr14, adx14, obv, valid.
+    Adds columns:
+    - Momentum: sma_fast, sma_slow, rsi, ema20, atr14, adx14, obv
+    - Support/Resistance: 52w_high, 52w_low, dist_from_52w_high, dist_from_52w_low,
+      range_position, anchored_vwap, vwap_upper_1sd, vwap_lower_1sd, vwap_upper_2sd,
+      vwap_lower_2sd, dist_from_vwap, is_swing_high, is_swing_low, last_swing_high,
+      last_swing_low, bars_since_swing_high, bars_since_swing_low
+    - valid: Boolean flag indicating sufficient data for core features
+
     If insufficient data, sets valid=False for all rows.
 
     Args:
@@ -98,6 +110,25 @@ def compute_features(df: pd.DataFrame, settings: Settings) -> pd.DataFrame:
     df["atr14"] = calculate_atr(df["high"], df["low"], df["close"], period=14)
     df["adx14"] = calculate_adx(df["high"], df["low"], df["close"], period=14)
     df["obv"] = calculate_obv(df["close"], df["volume"])
+
+    # Calculate support/resistance levels (US-028 Phase 7 - long-horizon analytics)
+    # 52-week high/low levels
+    levels_52w = calculate_52week_levels(df["high"], df["low"], window_days=252)
+    df = pd.concat([df, levels_52w], axis=1)
+
+    # Anchored VWAP (1-year lookback)
+    vwap_anchored = calculate_anchored_vwap(
+        df["high"],
+        df["low"],
+        df["close"],
+        df["volume"],
+        lookback_days=252,
+    )
+    df = pd.concat([df, vwap_anchored], axis=1)
+
+    # Swing highs/lows
+    swing_levels = calculate_swing_highs_lows(df["high"], df["low"], lookback_left=5, lookback_right=5)
+    df = pd.concat([df, swing_levels], axis=1)
 
     # Mark rows with valid indicators (non-NaN for core features)
     df["valid"] = df["sma_fast"].notna() & df["sma_slow"].notna() & df["rsi"].notna()
