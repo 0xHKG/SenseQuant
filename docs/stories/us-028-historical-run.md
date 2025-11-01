@@ -4327,3 +4327,68 @@ NIFTY 100 symbol universe expansion through batch-wise historical data ingestion
 - Status: Ready for review
 - **Critical fixes applied**: Timezone comparison bug, Bar initialization error
 - **Details**: See `docs/batch4-training-results.md`
+
+### Phase 7 Batch 5 Completion (2025-10-28/29)
+
+**Status:** ✓ **COMPLETE** - Critical Bugfix Applied, Training Functional
+
+**Critical Bugfix - Missing _load_cached_bars() Method:**
+- **Date**: 2025-10-28 (Very Late Night) / 2025-10-29 (Early Morning)
+- **Issue**: ALL dry-run training runs failing with exit status 1
+- **Root Cause**: Missing `_load_cached_bars()` method in `src/adapters/breeze_client.py:304`
+- **Error**: `AttributeError: 'BreezeClient' object has no attribute '_load_cached_bars'`
+- **Impact**: Training failed immediately on first window load attempt
+- **Discovery Method**: Profiling command (foreground execution revealed Python traceback)
+- **Implementation**: Complete 59-line method (lines 666-724) with CSV parsing, timezone handling, error handling
+- **Commit**: e1222ec (2025-10-29 00:03:06 IST)
+- **Testing**:
+  - Single-window profiling: LT symbol (123 bars, 2.871s) - SUCCESS
+  - Batch training: 30 symbols, 210 windows, 4 workers - 85.2% success rate
+
+**Investigation Timeline:**
+1. **22:31:59** - Executed profiling command (approved troubleshooting plan Step 2)
+2. **22:32:00** - **CRITICAL DISCOVERY**: AttributeError revealed in profiling output
+3. **22:32:05** - Located problem: Line 304 calls non-existent method
+4. **22:32:30** - Implemented complete `_load_cached_bars()` method (59 lines)
+5. **22:33:00** - Re-ran profiling → SUCCESS (2.871s, 123 bars loaded)
+6. **22:33:10** - Restarted Batch 5 training with fix
+7. **22:37:21** - Training completed: 179/210 windows successful (85.2%)
+
+**Training Execution Results:**
+- **Run ID**: `live_candidate_20251028_223310`
+- **Batch ID**: `batch_20251028_223310`
+- **Duration**: 4 minutes 11 seconds (22:33:10 - 22:37:21 IST)
+- **Configuration**: 30 symbols, 4 workers (multi-GPU), telemetry enabled, dry-run mode
+- **Success**: 179/210 windows (85.2%), 30/30 symbols processed
+- **Failures**: 31 windows (14.8%) - due to insufficient data (expected)
+  - Most failures: 2024-12-16 to 2024-12-31 windows (15-day period, requires 180 days)
+  - LICI early windows: IPO was May 2022, no data for 2022-01-01 start
+- **Performance**: 2.4x speedup with 4 workers, ~50 windows/minute throughput
+- **Artifacts**: `data/models/20251028_223310/`, `teacher_runs.json` (210 JSONL entries), 179 model directories
+- **Status**: Training pipeline functional, 85.2% success rate expected given data constraints
+
+**Issues Discovered:**
+1. 🔴 **Telemetry Flushing**: JSONL file empty (0 bytes) - needs `flush=True` in TrainingTelemetryLogger
+2. 🟡 **Output Buffering**: Orchestrator log minimal - needs `python -u` or `flush()` calls
+3. 🟡 **Failure Threshold**: 14.8% triggers exit - needs "insufficient data" vs "error" distinction
+4. 🟢 **End Date Adjustment**: Use 2024-12-01 instead of 2024-12-31 to reduce failures
+5. 🟡 **Symbol-Specific Start Dates**: Need per-symbol IPO dates in metadata
+
+**Key Insight:**
+> *"One profiling command revealed the root cause that 5 training runs over 2 hours couldn't."*
+>
+> Profiling runs in foreground (not subprocess), showing actual Python tracebacks that subprocess logs hide.
+
+**Overall NIFTY 100 Coverage:**
+- Verified symbols: **96/100 (96%)**
+- Batch 5 contribution: 30 symbols (100% ingestion, 85.2% training success)
+- Training pipeline: **Functional with dry-run mode operational**
+
+**Next Actions:**
+1. ✅ **Critical bugfix committed** - DONE (commit e1222ec)
+2. ✅ **Documentation updated** - DONE (claude.md, batch5-ingestion-report.md, this document)
+3. ⏳ **Fix telemetry flushing** - Add `flush=True` to logger
+4. ⏳ **Full 96-symbol retrain** - Execute complete NIFTY 100 universe training
+5. ⏳ **Tune failure threshold** - Implement error type distinction
+
+**Details**: See `docs/batch5-ingestion-report.md` (updated with training results and bugfix details)
