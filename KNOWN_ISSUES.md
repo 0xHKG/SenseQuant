@@ -6,11 +6,19 @@
 
 ## Active Issues
 
-### Issue #1: Phase 2 Telemetry Aggregation Bug 🔴 HIGH
+_No active issues at this time._
 
-**Status**: Open
-**Severity**: High (blocks telemetry dashboard testing)
+---
+
+## Resolved Issues
+
+### Issue #1: Phase 2 Telemetry Aggregation Bug ✅ RESOLVED
+
+**Status**: ✅ Resolved
+**Severity**: High (blocked telemetry dashboard testing)
 **Discovered**: 2025-11-01
+**Resolved**: 2025-11-01
+**Resolution Commit**: d363de9
 **Affects**: Training telemetry event emission
 
 **Description**:
@@ -56,41 +64,40 @@ conda run -n sensequant python scripts/run_historical_training.py \
 - Crash prevents telemetry buffer flush
 - JSONL file exists but is empty
 
-**Root Cause** (Preliminary):
-The error occurs when trying to aggregate teacher metrics for telemetry emission. The code at line 819 expects a dict but receives None. This suggests:
+**Root Cause** (Resolved):
+Three bugs in telemetry handling:
 
-1. Teacher training doesn't return metrics in expected format, OR
-2. Metrics extraction from `teacher_runs.json` returns None, OR
-3. Telemetry event creation expects non-None metrics
+1. **Aggregation TypeError** (Line 755): stats accessed as dict before None check
+   - `_aggregate_teacher_runs_from_json()` could return None
+   - stats['completed'] accessed at line 755 without checking if stats is None first
 
-**Code Context**:
-```python
-# scripts/run_historical_training.py:819 (approx)
-# Phase 2 telemetry aggregation after teacher training
-# Likely trying to access metrics['some_key'] where metrics is None
-```
+2. **Metrics NoneType** (Line 498): metrics/sample_counts could be None
+   - Telemetry emission tried to unpack None values with ** operator
 
-**Workaround**:
-- Disable telemetry (`--enable-telemetry` flag removed) for production runs
-- Training pipeline functions correctly without telemetry
+3. **Flush on Early Exit** (Line 165-224): telemetry not flushed when phases return False
+   - Only flushed on success or exception, not on early return
+   - Caused empty telemetry files (0 bytes) even when Phase 2 succeeded
 
-**Fix Priority**: HIGH - Required for dashboard integration and production monitoring
+**Resolution**:
+1. Moved fallback stats initialization before first access (line 727-756)
+   - stats is now guaranteed to be a dict, never None
+2. Added defensive "or {}" fallback for None metrics (line 498-499)
+3. Wrapped all phases in try/finally block (line 165-224)
+   - telemetry.close() now guaranteed on all exit paths
+   - Removed duplicate close() from exception handler
 
-**Investigation Needed**:
-1. Check `_aggregate_teacher_runs_from_json()` return value at line 475
-2. Verify Phase 2 telemetry emission code expects optional metrics
-3. Add None-checking before metric dictionary access
-4. Ensure buffer flush on error (try/finally pattern)
+**Testing**:
+- Smoke test: 2 symbols (LT, ADANIPORTS), 12 teacher windows
+- Phase 2 aggregation: ✅ SUCCESS (no crash)
+- Telemetry flush: ✅ 17 events (5.6KB) flushed despite Phase 3 failure
+- Evidence: `data/analytics/training/training_run_live_candidate_20251101_130729.jsonl`
+
+**Fixed In**: Commit d363de9 (2025-11-01 13:08 IST)
 
 **Related Commits**:
-- 14614b8: Fix telemetry flushing and output buffering issues (flush mechanism works)
-- Telemetry infrastructure is functional (manual tests pass)
-- Bug is in orchestrator's event emission, not telemetry logger
-
-**Testing Notes**:
-- Telemetry logger manual test passes (8 events validated)
-- Flush improvements work correctly (explicit flush + line buffering)
-- Issue is isolated to orchestrator Phase 2 code
+- 14614b8: Telemetry flush infrastructure (explicit flush + line buffering)
+- 7158b93: Live order-book provider
+- a6cf80d: Support/resistance analytics
 
 ---
 
@@ -131,12 +138,12 @@ The error occurs when trying to aggregate teacher metrics for telemetry emission
 
 ## Issue Tracking
 
-| ID | Issue | Severity | Status | Assignee |
-|----|-------|----------|--------|----------|
-| #1 | Phase 2 Telemetry Aggregation Bug | 🔴 HIGH | Open | - |
-| #2 | Missing _load_cached_bars() | 🔴 CRITICAL | ✅ Resolved | - |
-| #3 | Telemetry File Empty | 🔴 HIGH | ✅ Resolved | - |
+| ID | Issue | Severity | Status | Resolution Date | Commit |
+|----|-------|----------|--------|-----------------|--------|
+| #1 | Phase 2 Telemetry Aggregation Bug | 🔴 HIGH | ✅ Resolved | 2025-11-01 | d363de9 |
+| #2 | Missing _load_cached_bars() | 🔴 CRITICAL | ✅ Resolved | 2025-10-29 | e1222ec |
+| #3 | Telemetry File Empty | 🔴 HIGH | ✅ Resolved | 2025-11-01 | 14614b8 |
 
 ---
 
-**Report Generated**: 2025-11-01 12:45 IST
+**Report Generated**: 2025-11-01 13:10 IST (Updated after Issue #1 resolution)
