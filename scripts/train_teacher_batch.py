@@ -74,8 +74,8 @@ class BatchTrainer:
         # Generate batch ID
         self.batch_id = f"batch_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
 
-        # Create batch directory
-        self.batch_dir = output_dir / datetime.now().strftime("%Y%m%d_%H%M%S")
+        # Create batch directory (use batch_id to ensure consistency)
+        self.batch_dir = output_dir / self.batch_id
         self.batch_dir.mkdir(parents=True, exist_ok=True)
 
         # Batch metadata file (JSON Lines format)
@@ -1015,6 +1015,8 @@ class BatchTrainer:
                 time.sleep(backoff_seconds)
 
             # Build command with explicit GPU device ID (US-028 Phase 7: Multi-GPU fix)
+            # US-028 Phase 7 Afternoon: Add --output-dir flag (parallel mode fix)
+            artifacts_path = Path(task["artifacts_path"])
             cmd = [
                 sys.executable,
                 "scripts/train_teacher.py",
@@ -1026,6 +1028,8 @@ class BatchTrainer:
                 task["end_date"],
                 "--window",
                 str(forecast_horizon),
+                "--output-dir",
+                str(artifacts_path),
             ]
 
             # Add explicit GPU device ID to ensure LightGBM uses correct GPU

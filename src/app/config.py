@@ -936,13 +936,18 @@ class Settings(BaseSettings):  # type: ignore[misc]
             # Return all symbols
             return symbols_data if isinstance(symbols_data, list) else []
         elif mode == "nifty100":
-            # Return all NIFTY 100 symbols (excluding metals ETFs)
+            # Return all NIFTY 100 symbols
+            # Include all verified and placeholder categories (metals companies are valid NIFTY constituents)
+            # Only exclude symbols explicitly listed in data_unavailable array
             nifty_symbols = []
-            for category, symbols in categories_data.items():
-                # Exclude metals ETFs categories
-                if "metals_etfs" not in category and "metals" not in category:
-                    if isinstance(symbols, list):
-                        nifty_symbols.extend(symbols)
+            data_unavailable = metadata.get("data_unavailable", [])
+
+            for _category, symbols in categories_data.items():
+                # Include all categories (metals_etfs_verified, metals_placeholder, large_cap_verified, etc.)
+                if isinstance(symbols, list):
+                    # Filter out symbols with no data available
+                    available_symbols = [s for s in symbols if s not in data_unavailable]
+                    nifty_symbols.extend(available_symbols)
             return nifty_symbols
         elif mode == "metals_etfs":
             # Return only metals ETFs (GOLDBEES, SILVERBEES)
@@ -1019,7 +1024,7 @@ class Settings(BaseSettings):  # type: ignore[misc]
         if severity_filter:
             periods = [p for p in periods if p.get("severity") in severity_filter]
 
-        return periods
+        return periods  # type: ignore[no-any-return]
 
 
 settings = Settings()  # type: ignore[call-arg]

@@ -1,0 +1,37 @@
+{
+  "name": "sensequant-autopilot",
+  "description": "BMAD end-to-end cycle for SenseQuant: plan → data readiness → execution → QA.",
+  "steps": [
+    {
+      "agent": "bmad-sprint-planner",
+      "prompt": "Default"
+    },
+    {
+      "agent": "bmad-dataops-specialist",
+      "prompt": "Default",
+      "auto_mode": {
+        "enabled": true,
+        "max_steps": 120,
+        "retry_limit": 3
+      }
+    },
+    {
+      "agent": "bmad-developer",
+      "prompt": "Default",
+      "auto_mode": {
+        "enabled": true,
+        "max_steps": 200,
+        "retry_limit": 3
+      }
+    },
+    {
+      "agent": "bmad-qa-validator",
+      "prompt": "Default",
+      "auto_mode": {
+        "enabled": true,
+        "max_steps": 120,
+        "retry_limit": 2
+      }
+    }
+  ]
+}

@@ -114,6 +114,20 @@
 - **Artifacts:** `data/order_book/RELIANCE/2025-11-01/09-15-00.json`, smoke test run `live_candidate_20251101_132029`
 - **Next Steps:** Integrate order-book features into feature engineering, deploy to production
 
+#### 4.6.1 Operational Checklist for Order-Book Data ✅ DOCUMENTED
+- **Daily Ingestion Schedule**
+  - Run `scripts/fetch_order_book.py --symbols-mode nifty100 --interval-seconds 60` once per trading day (before market open).
+  - Re-run the command immediately before every intraday retraining cycle so depth snapshots reflect the latest session.
+- **Validation & Governance**
+  - After each fetch, execute `scripts/check_symbol_coverage.py --symbols-mode nifty100 --intervals 5minute 1day` to confirm depth files are present for the upcoming training run.
+  - Maintain an audit log under `data/order_book/metadata/` that records fetch timestamps, symbol counts, and API anomalies.
+- **Training Strategy**
+  - **Baseline Run (Price Only):** keep producing teacher/student runs using price-derived features to preserve the production reference.
+  - **Enhanced Run (Price + Order Book):** launch a second training pass that enables order-book features and compare both pipelines via the standard QA/backtest harness.
+  - Promote the enhanced configuration only if backtest + validation show measurable uplift (Sharpe, win rate, drawdown) without violating risk constraints.
+- **Documentation Hooks**
+  - Record fetch status and comparative training results in `PROJECT_STATUS.md` and weekly sprint notes so the order-book pipeline never runs “silent.”
+
 ### 4.7 Structural Support/Resistance Analytics ✅ COMPLETED
 - **Status:** Implemented (2025-11-01)
 - **Implementation:** Created `src/domain/support_resistance.py` module with 4 analytics functions:
