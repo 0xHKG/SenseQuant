@@ -2,6 +2,7 @@
 """Test different stock codes with Breeze API."""
 
 from breeze_connect import BreezeConnect
+
 from src.app.config import Settings
 
 settings = Settings()

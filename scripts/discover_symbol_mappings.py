@@ -179,7 +179,7 @@ def discover_mappings(
             error_count += 1
             logger.warning(f"  Failed: {result['symbol']} - {result.get('error', 'Unknown')}")
 
-    logger.info(f"\nDiscovery complete:")
+    logger.info("\nDiscovery complete:")
     logger.info(f"  Total symbols: {len(symbols)}")
     logger.info(f"  Successful: {success_count}")
     logger.info(f"  Errors: {error_count}")

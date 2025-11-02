@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Inspect cached historical data CSVs."""
 
-import pandas as pd
 from pathlib import Path
+
+import pandas as pd
 
 data_dir = Path("data/historical")
 symbols = ["RELIANCE", "TCS"]
@@ -49,11 +50,11 @@ for symbol in symbols:
     print(f"\nDate range: {combined['timestamp'].min()} to {combined['timestamp'].max()}")
 
     # Show first 5 rows
-    print(f"\nFirst 5 timestamps:")
+    print("\nFirst 5 timestamps:")
     print(combined[['timestamp', 'open', 'high', 'low', 'close', 'volume']].head(5).to_string(index=False))
 
     # Show last 5 rows
-    print(f"\nLast 5 timestamps:")
+    print("\nLast 5 timestamps:")
     print(combined[['timestamp', 'open', 'high', 'low', 'close', 'volume']].tail(5).to_string(index=False))
 
     # Check for gaps
@@ -80,14 +81,14 @@ for symbol in symbols:
     # Check for NaN values
     nan_counts = combined.isna().sum()
     if nan_counts.any():
-        print(f"\n⚠ NaN values found:")
+        print("\n⚠ NaN values found:")
         for col, count in nan_counts[nan_counts > 0].items():
             print(f"  {col}: {count} NaNs ({count/len(combined)*100:.1f}%)")
     else:
         print("\n✓ No NaN values")
 
     # Basic stats
-    print(f"\nPrice statistics:")
+    print("\nPrice statistics:")
     print(f"  Open:  min={combined['open'].min():.2f}, max={combined['open'].max():.2f}, mean={combined['open'].mean():.2f}")
     print(f"  Close: min={combined['close'].min():.2f}, max={combined['close'].max():.2f}, mean={combined['close'].mean():.2f}")
     print(f"  Volume: min={combined['volume'].min():.0f}, max={combined['volume'].max():.0f}, mean={combined['volume'].mean():.0f}")

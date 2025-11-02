@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Test if BreezeClient stock code mapping is working."""
 
+
 import pandas as pd
-from datetime import datetime
+
 from src.adapters.breeze_client import BreezeClient
 from src.app.config import Settings
 

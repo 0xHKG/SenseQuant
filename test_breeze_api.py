@@ -2,6 +2,7 @@
 """Quick test of Breeze API to diagnose HTTP 500 errors."""
 
 from breeze_connect import BreezeConnect
+
 from src.app.config import Settings
 
 settings = Settings()

@@ -636,6 +636,42 @@ class Settings(BaseSettings):  # type: ignore[misc]
     parallel_retry_backoff_seconds: int = Field(
         5, validation_alias="PARALLEL_RETRY_BACKOFF_SECONDS", ge=1, le=60
     )  # Backoff between retries (seconds)
+    batch_training_max_failure_rate: float = Field(
+        0.15, validation_alias="BATCH_TRAINING_MAX_FAILURE_RATE", ge=0.0, le=1.0
+    )  # Max acceptable failure rate (0.15 = 15%) before batch exit code 1
+
+    # Teacher Model GPU Tuning Parameters (US-028 Phase 7 GPU Optimization)
+    teacher_gpu_platform_id: int = Field(
+        0, validation_alias="TEACHER_GPU_PLATFORM_ID", ge=0, le=7
+    )  # OpenCL platform ID (usually 0)
+    teacher_gpu_device_id: int = Field(
+        0, validation_alias="TEACHER_GPU_DEVICE_ID", ge=0, le=7
+    )  # GPU device ID (0 for first GPU, 1 for second, etc.)
+    teacher_gpu_use_dp: bool = Field(
+        False, validation_alias="TEACHER_GPU_USE_DP"
+    )  # Use double precision on GPU (slower but more accurate)
+    teacher_num_leaves: int = Field(
+        127, validation_alias="TEACHER_NUM_LEAVES", ge=2, le=1024
+    )  # Max number of leaves in tree (higher = more complex)
+    teacher_max_depth: int = Field(
+        9, validation_alias="TEACHER_MAX_DEPTH", ge=1, le=20
+    )  # Maximum tree depth (higher = more complex, slower)
+    teacher_learning_rate: float = Field(
+        0.01, validation_alias="TEACHER_LEARNING_RATE", ge=0.001, le=1.0
+    )  # Learning rate for gradient boosting
+    teacher_n_estimators: int = Field(
+        500, validation_alias="TEACHER_N_ESTIMATORS", ge=10, le=5000
+    )  # Number of boosting rounds (with early stopping)
+    teacher_min_child_samples: int = Field(
+        20, validation_alias="TEACHER_MIN_CHILD_SAMPLES", ge=1, le=1000
+    )  # Minimum samples per leaf (regularization)
+    teacher_subsample: float = Field(
+        0.8, validation_alias="TEACHER_SUBSAMPLE", ge=0.1, le=1.0
+    )  # Row sampling fraction (bagging)
+    teacher_colsample_bytree: float = Field(
+        0.8, validation_alias="TEACHER_COLSAMPLE_BYTREE", ge=0.1, le=1.0
+    )  # Feature sampling fraction per tree
+
     scheduled_pipeline_skip_fetch: bool = Field(
         False, validation_alias="SCHEDULED_PIPELINE_SKIP_FETCH"
     )  # Skip data fetch phase in scheduled pipeline

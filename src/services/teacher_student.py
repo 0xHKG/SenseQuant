@@ -387,15 +387,16 @@ class TeacherLabeler:
             default_params = {
                 "objective": "binary",
                 "device": "cuda",  # MANDATORY GPU (2x A6000)
-                "gpu_platform_id": 0,
-                "gpu_device_id": 0,
-                "num_leaves": 127,  # High complexity for pattern recognition
-                "max_depth": 9,  # Deep trees for non-linear patterns
-                "learning_rate": 0.01,  # Slow learning for precision
-                "n_estimators": 500,  # Many boosting rounds with early stopping
-                "min_child_samples": 20,  # Regularization
-                "subsample": 0.8,  # Row sampling / bagging
-                "colsample_bytree": 0.8,  # Feature sampling
+                "gpu_platform_id": getattr(self.config, "teacher_gpu_platform_id", 0),
+                "gpu_device_id": getattr(self.config, "teacher_gpu_device_id", 0),
+                "gpu_use_dp": getattr(self.config, "teacher_gpu_use_dp", False),
+                "num_leaves": getattr(self.config, "teacher_num_leaves", 127),
+                "max_depth": getattr(self.config, "teacher_max_depth", 9),
+                "learning_rate": getattr(self.config, "teacher_learning_rate", 0.01),
+                "n_estimators": getattr(self.config, "teacher_n_estimators", 500),
+                "min_child_samples": getattr(self.config, "teacher_min_child_samples", 20),
+                "subsample": getattr(self.config, "teacher_subsample", 0.8),
+                "colsample_bytree": getattr(self.config, "teacher_colsample_bytree", 0.8),
                 "is_unbalance": True,  # Handle class imbalance
                 "random_state": self.config.random_seed,
                 "verbose": -1,
@@ -403,8 +404,21 @@ class TeacherLabeler:
             params = {**default_params, **model_params}
 
             logger.info(
-                "Training LightGBM classifier",
-                extra={"component": "teacher", "params": params},
+                "Training LightGBM classifier with GPU",
+                extra={
+                    "component": "teacher",
+                    "device": params.get("device"),
+                    "gpu_platform_id": params.get("gpu_platform_id"),
+                    "gpu_device_id": params.get("gpu_device_id"),
+                    "gpu_use_dp": params.get("gpu_use_dp"),
+                    "num_leaves": params.get("num_leaves"),
+                    "max_depth": params.get("max_depth"),
+                    "learning_rate": params.get("learning_rate"),
+                    "n_estimators": params.get("n_estimators"),
+                    "min_child_samples": params.get("min_child_samples"),
+                    "subsample": params.get("subsample"),
+                    "colsample_bytree": params.get("colsample_bytree"),
+                },
             )
 
             model = lgb.LGBMClassifier(**params)

@@ -1,108 +1,138 @@
-# SenseQuant — Architecture (v1.1)
+# SenseQuant — Architecture (v1.2)
 
-## 1. Module Map & Folder Layout
+> Last Updated: 2025-10-28  
+> Maintainer: SenseQuant Core Team (`claude.md#Contacts`)
 
-```
-src/
-├── adapters/              # External integrations
-│   ├── breeze_client.py   # Breeze API wrapper (market data, orders)
-│   └── sentiment_provider.py  # News/social sentiment feeds
-├── domain/                # Core business logic
-│   ├── strategies/
-│   │   ├── base.py        # Abstract Strategy interface
-│   │   ├── intraday.py    # IntradayStrategy (9:15–15:29 IST)
-│   │   └── swing.py       # SwingStrategy (2–10 day holds)
-│   ├── features.py        # TA indicators (SMA, RSI, VWAP, etc.)
-│   └── models.py          # Data models (Signal, Position, Order, Bar)
-├── services/              # Application services
-│   ├── data_feed.py        # Historical data abstraction (CSV/API/Hybrid)
-│   ├── risk_manager.py    # Exposure caps, SL/TP, circuit-breaker
-│   ├── position_sizer.py  # Kelly fraction / fixed notional
-│   ├── execution.py       # Order placement, retry logic
-│   └── teacher_student.py # EOD learning loop
-├── app/                   # Application layer
-│   ├── config.py          # Pydantic settings from .env
-│   ├── engine.py          # Main event loop (live/backtest)
-│   ├── logger.py          # Structured JSON logging
-│   └── cli.py             # CLI entry (modes: live, backtest, dry-run)
-└── main.py                # Entry point
-
-tests/
-├── unit/                  # Fast isolated tests
-│   ├── test_breeze_client.py
-│   ├── test_strategies.py
-│   └── test_risk_manager.py
-└── integration/           # End-to-end scenarios
-    └── test_backtest.py
-
-data/                      # Local cache
-├── historical/            # Downloaded OHLCV CSVs
-└── models/                # Trained student model weights
-
-logs/                      # Runtime outputs
-├── app.log                # Structured JSON logs
-└── trades.csv             # Audit journal (timestamp, symbol, action, price, qty, P&L)
-```
-
-## 2. Data Flow
+## 1. Module Map & Folder Layout (2025-10-28)
 
 ```
-┌─────────────────────────────────────────────────────────────────────────┐
-│ 1. INGESTION (adapters + services)                                      │
-│    DataFeed (services/data_feed.py):                                    │
-│      - CSVDataFeed: load from local CSV files                           │
-│      - BreezeDataFeed: fetch from API with automatic caching            │
-│      - HybridDataFeed: API-first with CSV fallback                      │
-│    BreezeClient: get_historical() / subscribe_live()                    │
-│    SentimentProvider: fetch_news() → sentiment_score(symbol)            │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    ↓
-┌─────────────────────────────────────────────────────────────────────────┐
-│ 2. FEATURE ENGINEERING (domain)                                         │
-│    features.py: compute_indicators(bars) → {sma_50, rsi_14, vwap, ...} │
-│    Merge sentiment_score into feature dict                              │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    ↓
-┌─────────────────────────────────────────────────────────────────────────┐
-│ 3. SIGNAL GENERATION (domain/strategies)                                │
-│    IntradayStrategy / SwingStrategy:                                    │
-│      - consume features + sentiment                                     │
-│      - output Signal(symbol, direction, confidence, reason)             │
-│    Sentiment gating: if sentiment < -0.3 → suppress BUY signals         │
-│    Sentiment boost: if sentiment > +0.5 → scale confidence by 1.2x      │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    ↓
-┌─────────────────────────────────────────────────────────────────────────┐
-│ 4. RISK & POSITION SIZING (services)                                    │
-│    RiskManager:                                                         │
-│      - check global exposure cap, daily loss limit                      │
-│      - enforce circuit-breaker if triggered                             │
-│      - attach SL/TP levels to signal                                    │
-│    PositionSizer:                                                       │
-│      - compute qty = f(confidence, available_capital, volatility)       │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    ↓
-┌─────────────────────────────────────────────────────────────────────────┐
-│ 5. EXECUTION (services/execution + adapters/breeze_client)              │
-│    ExecutionService.place_order(order):                                 │
-│      - if dry_run: log to console, return mock OrderID                  │
-│      - else: BreezeClient.place_order() with retry on transient errors  │
-│      - log response (order_id, status, timestamp)                       │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    ↓
-┌─────────────────────────────────────────────────────────────────────────┐
-│ 6. LOGGING & AUDIT (app/logger)                                         │
-│    - Append to logs/app.log (JSON: {ts, level, component, msg})         │
-│    - Append to logs/trades.csv (trade journal for analytics)            │
-└─────────────────────────────────────────────────────────────────────────┘
-                                    ↓
-┌─────────────────────────────────────────────────────────────────────────┐
-│ 7. EOD TEACHER–STUDENT (services/teacher_student)                       │
-│    - Teacher reviews day's trades + market context → generate labels    │
-│    - Student retrains on expanding window → update params/weights       │
-│    - Persist new config; rollback if validation loss degrades           │
-└─────────────────────────────────────────────────────────────────────────┘
+sensequant/
+├── scripts/
+│   ├── fetch_historical_data.py
+│   ├── discover_symbol_mappings.py
+│   ├── train_teacher.py
+│   ├── train_teacher_batch.py
+│   ├── train_student_batch.py
+│   ├── run_historical_training.py
+│   ├── run_model_validation.py
+│   ├── run_statistical_tests.py
+│   ├── release_audit.py
+│   └── ... (monitoring, stress, utility scripts)
+├── src/
+│   ├── adapters/
+│   │   ├── breeze_client.py
+│   │   └── sentiment/
+│   ├── app/
+│   │   ├── config.py
+│   │   ├── engine.py
+│   │   ├── logger.py
+│   │   └── cli.py
+│   ├── domain/
+│   │   ├── strategies/
+│   │   │   ├── intraday.py
+│   │   │   └── swing.py
+│   │   ├── features.py
+│   │   └── types.py
+│   ├── features/
+│   │   ├── macro.py
+│   │   ├── options.py
+│   │   └── order_book.py
+│   └── services/
+│       ├── backtester.py
+│       ├── data_feed.py
+│       ├── monitoring.py
+│       ├── optimizer.py
+│       ├── reward_calculator.py
+│       ├── risk_manager.py
+│       ├── secrets_manager.py
+│       ├── state_manager.py
+│       ├── teacher_student.py
+│       ├── training_telemetry.py
+│       └── sentiment/
+├── data/
+│   ├── historical/
+│   ├── models/
+│   ├── analytics/
+│   └── state/
+├── release/
+│   └── audit_live_candidate_*/
+├── docs/
+│   ├── batch*-*.md
+│   ├── stories/
+│   └── governance docs
+└── tests/
+    ├── unit/
+    ├── integration/
+    └── fixtures/
 ```
+
+**Highlights**
+
+- `scripts/` orchestrates ingestion, training, validation, auditing, monitoring, and support utilities.
+- `src/services/` hosts the orchestration stack (teacher/student pipeline, telemetry, risk, state management).
+- `data/analytics/training/` stores structured `TrainingEvent` streams for dashboards and alerting.
+- `release/audit_live_candidate_*` directories hold auditable bundles with manifests, metrics, and promotion briefings.
+
+## 2. Historical Data & Training Topology
+
+```mermaid
+flowchart TD
+    subgraph Ingestion["Phase 1 — Data Ingestion"]
+        A[Breeze API]
+        B[Symbol Metadata]
+        C[Sentiment Snapshots]
+    end
+
+    subgraph Training["Phases 2-3 — Teacher & Student"]
+        T2[TeacherLabeler
+(GPU LightGBM)]
+        T3[Student Trainer
+(Reward Metrics)]
+    end
+
+    subgraph Validation["Phases 4-7 — Validation & Release"]
+        V4[Model Validation]
+        V5[Statistical Tests]
+        V6[Release Audit]
+        V7[Promotion Briefing]
+    end
+
+    subgraph Storage["Artifacts & Telemetry"]
+        D1[data/historical] 
+        D2[data/historical/metadata] 
+        D3[data/models/<batch>/<symbol_window>] 
+        D4[data/analytics/training] 
+        D5[release/audit_live_candidate_*] 
+        D6[data/state]
+    end
+
+    A -->|chunked OHLCV| D1
+    B --> D2
+    C --> T2
+    D1 --> T2
+    T2 -->|teacher artifacts| D3
+    D3 --> T3
+    T2 --> V4
+    T3 --> V4
+    V4 -->|validation_run_id| V5
+    V5 -->|stat_tests.json| V6
+    V6 -->|audit bundle| V7
+    T2 -->|TrainingEvent| D4
+    T3 -->|TrainingEvent| D4
+    V7 -->|promotion briefing| D5
+    Ingestion --> D6
+    Training --> D6
+```
+
+**Phase Summary**
+
+- **Phase 1:** `scripts/fetch_historical_data.py` ingests chunked OHLCV with coverage audits, storing results under `data/historical/` and metadata.
+- **Phases 2–3:** `TeacherLabeler` and student batch trainer operate on rolling windows, persisting artifacts under `data/models/<batch>/<symbol_window>/` and streaming telemetry events.
+- **Phases 4–5:** Validation and statistical testing consolidate metrics into `release/audit_validation_<run_id>/`.
+- **Phases 6–7:** Release audit and promotion briefing compile manifests, QA checklists, and governance summaries in `release/audit_live_candidate_<run_id>/`.
+- **Telemetry & State:** `data/analytics/training/` retains JSONL event streams; `data/state/` holds checkpoints, session notes, and progress snapshots.
+
+---
 
 ## 3. Configuration Management (Pydantic)
 

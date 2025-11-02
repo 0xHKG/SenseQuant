@@ -120,7 +120,9 @@ class OrderBookFetcher:
                     session_token=session_token,
                     dry_run=False,
                 )
-                logger.info("Initialized Breeze client for order book provider")
+                # BUGFIX (2025-11-01): Authenticate client before use
+                client.authenticate()
+                logger.info("Initialized and authenticated Breeze client for order book provider")
             else:
                 logger.warning(
                     "Missing Breeze credentials, provider will use dryrun mode. "

@@ -318,12 +318,12 @@ def test_feature_importance_ranking(mock_client_large_data: MagicMock) -> None:
 
 def test_batch_trainer_skips_insufficient_future_data() -> None:
     """Test that BatchTrainer skips windows with insufficient future data."""
-    from datetime import datetime, timedelta
+    from datetime import datetime
     from pathlib import Path
     from unittest.mock import MagicMock
 
-    from src.app.config import Settings
     from scripts.train_teacher_batch import BatchTrainer
+    from src.app.config import Settings
 
     # Create mock settings
     settings = MagicMock(spec=Settings)
@@ -397,8 +397,9 @@ def test_batch_trainer_deterministic_window_labels() -> None:
     """Test that window labels are deterministic and include explicit dates (US-028 Phase 6e)."""
     from pathlib import Path
     from unittest.mock import MagicMock
-    from src.app.config import Settings
+
     from scripts.train_teacher_batch import BatchTrainer
+    from src.app.config import Settings
 
     settings = MagicMock(spec=Settings)
     settings.batch_training_output_dir = "data/models"
@@ -450,8 +451,9 @@ def test_batch_trainer_error_reporting_with_traceback() -> None:
     import subprocess
     from pathlib import Path
     from unittest.mock import MagicMock, patch
-    from src.app.config import Settings
+
     from scripts.train_teacher_batch import BatchTrainer
+    from src.app.config import Settings
 
     settings = MagicMock(spec=Settings)
     settings.batch_training_output_dir = "data/models"
@@ -517,8 +519,9 @@ def test_batch_trainer_skips_zero_sample_windows() -> None:
     """Test that BatchTrainer skips windows with zero samples after filtering (US-028 Phase 6f)."""
     from pathlib import Path
     from unittest.mock import MagicMock, patch
-    from src.app.config import Settings
+
     from scripts.train_teacher_batch import BatchTrainer
+    from src.app.config import Settings
 
     settings = MagicMock(spec=Settings)
     settings.batch_training_output_dir = "data/models"
@@ -571,8 +574,9 @@ def test_batch_trainer_includes_sample_diagnostics_on_success() -> None:
     """Test that successful training includes sample count diagnostics (US-028 Phase 6f)."""
     from pathlib import Path
     from unittest.mock import MagicMock, patch
-    from src.app.config import Settings
+
     from scripts.train_teacher_batch import BatchTrainer
+    from src.app.config import Settings
 
     settings = MagicMock(spec=Settings)
     settings.batch_training_output_dir = "data/models"

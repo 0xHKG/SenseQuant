@@ -81,6 +81,10 @@ class TrainingConfig:
     train_split: float = 0.8
     random_seed: int = 42
     model_params: dict[str, Any] | None = None
+    # GPU parameters for LightGBM (US-028 Phase 7 GPU optimization)
+    gpu_use_dp: bool = False  # Use double precision (more compute-intensive)
+    gpu_device_id: int = 0  # GPU device ID (overridden by CUDA_VISIBLE_DEVICES)
+    gpu_platform_id: int = 0  # OpenCL platform ID
 
 
 @dataclass

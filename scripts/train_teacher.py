@@ -116,6 +116,13 @@ def parse_args() -> argparse.Namespace:
         help="Output directory for model artifacts (default: data/models/)",
     )
 
+    parser.add_argument(
+        "--gpu-device-id",
+        type=int,
+        default=None,
+        help="Explicit GPU device ID to use (overrides CUDA_VISIBLE_DEVICES and settings)",
+    )
+
     return parser.parse_args()
 
 
@@ -212,6 +219,14 @@ def main() -> None:
     except Exception as e:
         logger.error(f"Failed to initialize BreezeClient: {e}")
         sys.exit(1)
+
+    # Override GPU device ID if specified via CLI (US-028 Phase 7: Multi-GPU fix)
+    if args.gpu_device_id is not None:
+        settings.teacher_gpu_device_id = args.gpu_device_id
+        logger.info(
+            f"GPU device ID override: {args.gpu_device_id} (CLI --gpu-device-id)",
+            extra={"component": "teacher", "gpu_device_id": args.gpu_device_id},
+        )
 
     # Create TeacherLabeler (US-028 Phase 6o: pass output_dir)
     output_dir = Path(args.output_dir) if args.output_dir else None

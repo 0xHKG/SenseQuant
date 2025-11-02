@@ -1,223 +1,185 @@
 # SenseQuant Project Overview
 
-> **Audience:** Engineering, Data Science, Product, and Operations stakeholders  
-> **Document Type:** Development & User Documentation  
-> **Last Updated:** 2025-10-14  
-> **Maintainer:** SenseQuant Core Team (see `claude.md#Contacts`)
+> **Audience:** Engineering, Data Science, Product, Operations  
+> **Document Type:** Development & Operations Reference  
+> **Last Updated:** 2025-10-28  
+> **Maintainer:** SenseQuant Core Team (`claude.md#Contacts`)
 
 ---
 
 ## 1. Executive Summary
 
-SenseQuant is an end-to-end algorithmic trading platform focused on Indian equity markets (NSE/BSE).  
-It combines a teacher–student learning architecture, multi-phase validation pipeline, and release governance to promote trading models from research to production with auditable quality gates.
+SenseQuant delivers an end-to-end algorithmic trading platform for Indian equities built on a teacher–student pipeline with auditable BMAD governance. As of 28 October 2025 we have completed a full historical training run across the NIFTY 100 universe (96 tradeable constituents plus metals ETFs), validated release artifacts, and instrumented telemetry for Phase 7 training.
 
-**Key Capabilities**
+**October 2025 Highlights**
 
-- Historical data ingestion (chunked, rate-limited) with integrity checks.
-- Teacher/Student dual-stage model training with reward/punishment roadmap.
-- Statistical validation (walk-forward CV, bootstrap, hypothesis tests).
-- Release audit & promotion briefing with policy checks.
-- Roadmap for NIFTY100 + Metals expansion, reward loops, and black-swan stress tests.
+- **NIFTY 100 Coverage:** 96 verified constituents with 3-year OHLCV history (2022-01-01 through 2025-10-28) across `1day` and `5minute` intervals. Four official tickers (ADANIGREEN, IDEA, APLAPOLLO, DIXON) remain data-unavailable via Breeze and are tracked in metadata for follow-up.
+- **Teacher/Student Run:** `live_candidate_20251028_154400` completed phases 1–7 with 216/252 windows succeeding (36 expected skips, 0 failures) and produced audited artifacts ready for promotion.
+- **Telemetry:** New `TrainingEvent` stream records per-window progress and GPU metrics under `data/analytics/training/`, enabling dashboards to visualise training health.
+- **Governance Refresh:** Commandments, PRD, and architecture overview updated to reflect current operating procedures and system state.
+- **Next Focus:** Enable multi-GPU execution, close the four-symbol data gap, automate reward loop weighting, and build Phase 8 stress testing.
 
 ---
 
-## 2. Solution Architecture
+## 2. Solution Architecture Overview
 
 ```mermaid
 flowchart TD
-    subgraph Data["Data Sources"]
+    subgraph Data["Market & Metadata Sources"]
         A[Breeze OHLCV \n (Equities, ETFs)]
         B[Breeze Sentiment API]
-        C[Stress Period Library \n (Roadmap)]
+        C[Index Metadata \n (nifty100_constituents.json)]
     end
 
-    subgraph Pipeline["Historical Training Pipeline"]
-        P1[Phase 1: Data Ingestion]
-        P2[Phase 2: Teacher Training]
-        P3[Phase 3: Student Training]
-        P4[Phase 4: Model Validation]
-        P5[Phase 5: Statistical Tests]
-        P6[Phase 6: Release Audit]
-        P7[Phase 7: Promotion Briefing]
+    subgraph Pipeline["Historical Training Orchestrator"]
+        P1[Phase 1:\nData Ingestion]
+        P2[Phase 2:\nTeacher Training]
+        P3[Phase 3:\nStudent Training]
+        P4[Phase 4:\nModel Validation]
+        P5[Phase 5:\nStatistical Tests]
+        P6[Phase 6:\nRelease Audit]
+        P7[Phase 7:\nPromotion Briefing]
+        P8[Telemetry:\nTraining Events]
     end
 
     subgraph Storage["Persistent Artifacts"]
         D1[data/historical/<symbol>/<interval>/]
-        D2[data/models/<batch_id>/teacher_runs.json]
-        D3[data/models/<batch_id>/student_runs.json]
-        D4[release/audit_<run_id>/]
-        D5[data/state/* (progress, checkpoints)]
+        D2[data/historical/metadata/*.json]
+        D3[data/models/<batch_id>/<symbol_window>/]
+        D4[release/audit_live_candidate_<run_id>/]
+        D5[data/analytics/training/training_run_*.jsonl]
+        D6[data/state/*]
     end
 
     Data --> P1
-    P1 -->|OHLCV & Sentiment| D1
+    P1 -->|Chunked OHLCV| D1
+    P1 -->|Mappings & coverage| D2
     D1 --> P2
-    P2 -->|Teacher Artifacts| D2
-    D2 --> P3
-    P3 -->|Student Artifacts| D3
+    P2 -->|Teacher Artifacts| D3
+    D3 --> P3
     P2 & P3 --> P4
     P4 -->|validation_run_id| P5
     P5 -->|stat_tests.json| P6
     P6 -->|Audit Bundle| P7
+    P2 & P3 --> P8
+    P8 -->|TrainingEvent logs| D5
     P7 -->|Promotion Briefing| D4
-    P1 & P2 & P3 -->|Progress Snapshots (Phase 7 roadmap)| D5
+    P1 & P2 & P3 -->|State Snapshots| D6
 ```
 
 ---
 
-## 3. Filesystem & Artifact Layout
+## 3. Filesystem & Artifact Layout (2025-10-28)
 
 | Path | Description |
 |------|-------------|
-| `data/historical/<SYMBOL>/<INTERVAL>/<DATE>.csv` | Canonical OHLCV data (post-chunking) |
-| `data/models/<BATCH_ID>/` | Teacher & student artifacts per window (Phase 6o+) |
-| `data/state/` | StateManager checkpoints, progress snapshots (Phase 7 roadmap) |
-| `release/audit_<RUN_ID>/` | Statistical validation bundle |
-| `release/audit_live_candidate_<RUN_ID>/` | Release audit output + promotion briefing |
-| `docs/stories/us-028-historical-run.md` | Phase-by-phase documentation (6a–6t) |
-| `claude.md` | Operational guide, roadmap, current sprint notes |
+| `data/historical/<SYMBOL>/<INTERVAL>/<DATE>.csv` | Canonical OHLCV data (deduplicated chunk ingestion) |
+| `data/historical/metadata/nifty100_constituents.json` | Index metadata (96 verified, 4 data-unavailable tickers) |
+| `data/historical/metadata/symbol_mappings*.json` | NSE → ISEC symbol mappings by batch |
+| `data/historical/metadata/coverage_*.json[l]` | Coverage audit outputs per ingestion batch |
+| `data/models/<BATCH_ID>/<SYMBOL_WINDOW>/` | Teacher & student artifacts (`model.pkl`, `labels.csv.gz`, `metadata.json`, `feature_importance.csv`) |
+| `release/audit_live_candidate_<RUN_ID>/` | Validation bundle, statistical tests, promotion briefing |
+| `data/analytics/training/training_run_*.jsonl` | Streaming `TrainingEvent` telemetry for dashboards |
+| `data/state/` | StateManager checkpoints, session notes, progress snapshots |
+| `docs/batch*-*.md` | Batch-specific ingestion and training reports |
+| `claude.md` | Operational guide, session history, contacts |
 
 ---
 
-## 4. Historical Training Pipeline (Phase 1–7 Detail)
+## 4. Historical Training Pipeline
 
-| Phase | Description | Key Scripts | Outputs |
-|-------|-------------|--------------|---------|
-| **Phase 1** | Chunked ingestion + sentiment snapshot. Rate-limited, cache-aware. | `scripts/fetch_historical_data.py` | `data/historical/*` |
-| **Phase 2** | Teacher training per window (180-day default). Deterministic labels & diagnostics. | `scripts/train_teacher_batch.py`, `scripts/train_teacher.py` | `teacher_runs.json`, per-window subdirs |
-| **Phase 3** | Student training using teacher labels. Phase 6p: features derived from `labels.csv.gz`. | `scripts/train_student_batch.py`, `src/services/teacher_student.py` | `student_runs.json`, student model dirs |
-| **Phase 4** | Validation pipeline (model metrics, telemetry). Phase 6v extracts `validation_run_id`. | `scripts/run_model_validation.py` | `data/validation/<run_id>/` |
-| **Phase 5** | Statistical tests using real metrics (Phase 6w). Walk-forward CV, bootstrap, stress stats. | `scripts/run_statistical_tests.py` | `release/audit_validation_<run_id>/stat_tests.json` |
-| **Phase 6** | Release audit. Phase 6r tolerates exit code 1 (deployment warnings). | `scripts/release_audit.py` | `release/audit_live_candidate_<run_id>/` |
-| **Phase 7** | Promotion briefing generation + artifact validation (Phase 6s fixes). | `scripts/promote_candidate.py` (invoked via orchestrator) | `promotion_briefing.md`, validated paths |
-
-**Orchestrator entry point:** `scripts/run_historical_training.py`  
-Supports CLI flags: `--symbols`, `--start-date`, `--end-date`, `--no-dryrun`, `--skip-fetch`.
+| Phase | Description | Key Scripts / Modules | Primary Outputs |
+|-------|-------------|-----------------------|-----------------|
+| **1. Data Ingestion** | Chunked Breeze ingestion with caching, retries, and coverage audits | `scripts/fetch_historical_data.py`, `scripts/check_symbol_coverage.py` | `data/historical/*`, coverage reports, ingestion logs |
+| **2. Teacher Training** | LightGBM teacher models per rolling window (GPU) | `scripts/train_teacher_batch.py`, `src/services/teacher_student.py` | Teacher artifacts per window, telemetry events |
+| **3. Student Training** | Student retraining on teacher labels, reward metrics | `scripts/train_student_batch.py`, `src/services/teacher_student.py` | Student model artifacts, reward summaries |
+| **4. Model Validation** | Aggregate metrics, produce validation run id | `scripts/run_model_validation.py`, `src/services/monitoring.py` | `validation_<timestamp>/metrics.json` |
+| **5. Statistical Tests** | Walk-forward CV, bootstrap, hypothesis tests | `scripts/run_statistical_tests.py` | `release/audit_validation_<run_id>/stat_tests.json` |
+| **6. Release Audit** | Compile audit bundle with warnings tolerance | `scripts/release_audit.py`, `src/services/state_manager.py` | `release/audit_live_candidate_<run_id>/manifest.yaml` |
+| **7. Promotion Briefing** | Generate promotion briefing and artifact validation | `scripts/promote_candidate.py` | `promotion_briefing.md`, manifest |
+| **Telemetry** | Streaming progress, GPU load, outcomes | `src/services/training_telemetry.py` | `TrainingEvent` JSONL series under `data/analytics/training/` |
 
 ---
 
-## 5. Teacher–Student Training
+## 5. Teacher & Student Training – Batch 4 (2025-10-28)
 
-### 5.1 Teacher Windows
-- Window size: 180 days (Phase 6h).  
-- Minimum sample threshold: 20 (skip if insufficient).  
-- Artifacts per window:
-  - `model.pkl` – serialized estimator.
-  - `labels.csv.gz` – features + labeled outcome (gzip).
-  - `metadata.json` – window metadata, hyperparameters.
-  - `feature_importance.csv` – LightGBM feature ranking (if available).
+- **Batch Directory:** `data/models/20251028_154400/` (`live_candidate_20251028_154400`)
+- **Symbol Coverage:** 36/36 Batch 4 symbols (100%), seven windows per symbol.
+- **Windows:** 252 total (216 success, 36 expected skips because forward labels exceeded available data), 0 failures.
+- **Artifacts:** Every successful window stores `model.pkl`, `labels.csv.gz`, `metadata.json`, `feature_importance.csv`, plus student counterparts and reward logs.
+- **Fixes Applied:** Timezone alignment for DRYRUN CSV timestamps and removal of invalid `symbol` parameter in `Bar` dataclass.
+- **Telemetry:** Training runs emit structured events under `data/analytics/training/training_run_live_candidate_*.jsonl`.
 
-### 5.2 Student Windows
-- Consumes teacher artifacts per window.  
-- Extracts features directly from `labels.csv.gz` (Phase 6p).  
-- `student_runs.json` records metrics (accuracy, precision, recall, F1).  
-- Roadmap: reward/punishment loop (Phase 7 Initiative 2).
+_Action:_ Extend teacher training to Batch 5 symbols (30 remaining) after implementing GPU assignment for multi-worker runs.
 
 ---
 
-## 6. Statistical Validation (Phase 5)
+## 6. Statistical Validation & Release Audit
 
-- Input: `validation_run_id` produced during Phase 4.  
-- Metrics loaded from `teacher_runs.json` & `student_runs.json` (Phase 6w).  
-- Tests performed:
-  - Walk-forward cross-validation across teacher windows.
-  - Bootstrap resampling for statistical significance.
-  - Hypothesis tests (p-value, delta between baseline and candidate).
-  - Sharpe/Sortino/Information ratios vs. benchmark.
-- Output: `release/audit_validation_<run_id>/stat_tests.json`  
-  - Contains aggregated metrics, distribution stats, pass/fail flags.
+- **Validation Run:** `validation_20251028_155300` completed successfully (Phase 4).
+- **Statistical Tests:** Stored under `release/audit_validation_20251028_155300/` with real metrics and pass verdict.
+- **Release Audit:** `release/audit_live_candidate_20251028_154400/` produced manifest, promotion briefing, and QA checklist with exit code 0.
+- **Promotion Briefing:** Summarises per-symbol performance, reward metrics, and outstanding risks (none blocking).
 
 ---
 
-## 7. Release Governance (Phases 6–7)
+## 7. Phase 7 Roadmap (Status: 2025-10-28)
 
-```mermaid
-sequenceDiagram
-    participant Orchestrator
-    participant Audit
-    participant Bundle as release/audit_<run_id>
-    participant Promotion as release/audit_live_candidate_<run_id>
-
-    Orchestrator->>Audit: run_statistical_tests (validation_run_id)
-    Audit-->>Bundle: stat_tests.json, metrics.json
-    Orchestrator->>Promotion: release_audit.py (tolerate exit code 1)
-    Promotion-->>Promotion: promotion_briefing.md, manifest.yaml
-    Orchestrator->>Promotion: _validate_artifacts(batch_dir)
-    Note right of Promotion: Phase 6s ensures teacher/student metadata is located via batch_dir snapshot.
-```
-
-Exit code handling (Phase 6r):
-- `0`: Full success.
-- `1`: Success with warnings (expected for historical training—optimizer & deployment checks).
-- `>=2`: Fatal error, abort pipeline.
+| Initiative | Objective | Status | Notes / Next Actions |
+|------------|-----------|--------|----------------------|
+| **1. Broaden Training Data** | NIFTY100 + Metals coverage with 3-year history | ✅ Complete | 96 verified symbols ingested; four official tickers tracked as data-unavailable. |
+| **2. Reward Loop** | Adaptive weighting from reward signals | 🟡 In Progress | Reward metrics captured; weighting & governance rules to be implemented. |
+| **3. Black-Swan Stress Tests** | Scenario testing for tail events | 🔴 Not Started | Requires Phase 8 orchestrator and scenario datasets. |
+| **4. Training Progress Monitoring** | Real-time dashboards & alerts | 🟡 In Progress | `TrainingEvent` telemetry available; dashboard integration pending. |
+| **5. Multi-GPU Acceleration** | Utilise dual RTX A6000 for batch runs | 🟡 In Progress | Spike complete; update worker GPU assignment before Batch 5 training. |
 
 ---
 
-## 8. Phase 7 Roadmap (In-Progress)
+## 8. Monitoring & Telemetry
 
-| Initiative | Objective | Highlights | Status |
-|------------|-----------|------------|--------|
-| **1. Broaden Training Data** | Expand to NIFTY100 + Gold/Silver ETFs with 3-year history. | Add symbol metadata, enforce rate limits, append-only storage with duplicate/gap detection. | Planned (Sprint 1) |
-| **2. Reward Loop** | Adaptive teacher–student training via prize/punishment signals. | Reward derivation from realized returns, reward_history logging, sample weighting. | Planned (Sprint 2) |
-| **3. Black-Swan Stress Tests** | Stress-test models against 2008, 2013, 2020, etc. | Phase 8 orchestrator, resilience scoring, failure classification. | Planned (Sprint 2) |
-| **4. Training Progress Monitoring** | Real-time progress (terminal + telemetry). | Progress checkpoints, StateManager enhancements, optional streamlit dashboard. | Planned (Sprint 1) |
-
-See `claude.md#Phase-7-Market-Expansion-&-Reward-Loop-Roadmap` for detailed tasks, open questions, and timeline (3 sprints ≈ 5–6 weeks).
+- **Structured Logs:** `logs/` (loguru JSON) for ingestion, training, validation, and audits.
+- **Training Telemetry:** `data/analytics/training/training_run_live_candidate_*.jsonl` with phase transitions, window status, GPU utilisation.
+- **Backtest Telemetry:** `dashboards/telemetry_dashboard.py` (extend with training tab).
+- **State Tracking:** `data/state/training_progress.json` (planned), `data/state/session_notes.json`, batch coverage summaries.
+- **Command Logs:** `docs/logs/session_YYYYMMDD_commands.txt` (per session).
 
 ---
 
-## 9. Monitoring & Telemetry
+## 9. Known Limitations & Upcoming Work
 
-- **Logs:** `logs/` directory (structured JSON; loguru-based).  
-- **Telemetry Dashboard:** `dashboards/telemetry_dashboard.py` (streamlit optional; Phase 6x grace/skips).  
-- **Progress Snapshots (Roadmap):** `data/state/training_progress.json` (to be implemented in Phase 7 Initiative 4).  
-- **Session Notes:** `data/state/session_notes.json` (daily wrap-up).  
-- **Command History:** `docs/logs/session_YYYYMMDD_commands.txt`.
-
----
-
-## 10. Known Limitations & Next Steps
-
-1. **Statistical tests use real metrics** but still rely on simulated data if metrics missing—ensure validation always produces complete JSON.  
-2. **Telemetry test** currently skips when `streamlit` absent (Phase 6x); install `streamlit` for full experience.  
-3. **Reward loop & black-swan analysis** not yet implemented (Phase 7).  
-4. **API rate limits** – monitor while scaling to NIFTY100; consider caching/parquet to reduce load.  
-5. **Mypy warnings** remain in legacy modules (`src/services/state_manager.py`); address during refactor.
+1. **Data gaps** for ADANIGREEN, IDEA, APLAPOLLO, DIXON — pursue alternate sources or risk sign-off for exclusion.
+2. **GPU assignment** currently hardcoded to device 0 — implement worker-level `gpu_device_id` selection to leverage both RTX A6000 GPUs.
+3. **Reward loop automation** — convert recorded reward metrics into adaptive sampling and deployment governance.
+4. **Stress testing** — add Phase 8 orchestrator with 2008/2013/2020 scenarios and automate reporting.
+5. **Telemetry dashboards** — surface training telemetry, GPU load, and anomaly alerts in Streamlit / Ops tooling.
+6. **Order book ingestion** — flip `ORDER_BOOK_ENABLED` and `ENABLE_ORDER_BOOK_FEATURES` only after replacing the stub provider with validated live depth snapshots.
+7. **Structural support/resistance analytics** — design long-horizon support/resistance feature module and integrate into swing/teacher signals prior to release.
 
 ---
 
-## Appendix A – CLI Cheat Sheet
+## Appendix A – CLI Cheat Sheet (2025-10-28)
 
 | Purpose | Command |
 |---------|---------|
-| Full pipeline run | `conda run -n sensequant python scripts/run_historical_training.py --symbols RELIANCE,TCS --start-date 2023-01-01 --end-date 2024-06-23 --no-dryrun` |
-| Teacher batch only | `conda run -n sensequant python scripts/train_teacher_batch.py --symbols RELIANCE,TCS --start-date 2023-01-01 --end-date 2024-06-23 --window-days 180 --forecast-horizon 7` |
-| Student batch only | `conda run -n sensequant python scripts/train_student_batch.py` |
-| Statistical tests | `conda run -n sensequant python scripts/run_statistical_tests.py --run-id validation_YYYYMMDD_HHMMSS` |
-| Release audit | `conda run -n sensequant python scripts/release_audit.py --candidate live_candidate_YYYYMMDD_HHMMSS` |
-| Integration tests | `conda run -n sensequant python -m pytest tests/integration -q` |
-| Linting | `conda run -n sensequant python -m ruff check .` |
+| Full pipeline run | `conda run -n sensequant python scripts/run_historical_training.py --symbols $(paste -sd, data/historical/metadata/batch4_training_symbols.txt) --start-date 2022-01-01 --end-date 2024-12-31 --skip-fetch` |
+| Teacher batch (multi-GPU ready) | `conda run -n sensequant python scripts/train_teacher_batch.py --symbols $(paste -sd, data/historical/metadata/batch4_training_symbols.txt) --start-date 2022-01-01 --end-date 2024-12-31 --workers 2` |
+| Student batch | `conda run -n sensequant python scripts/train_student_batch.py --batch-id 20251028_154400` |
+| Statistical tests | `conda run -n sensequant python scripts/run_statistical_tests.py --run-id validation_20251028_155300` |
+| Release audit | `conda run -n sensequant python scripts/release_audit.py --candidate live_candidate_20251028_154400` |
+| Coverage audit | `conda run -n sensequant python scripts/check_symbol_coverage.py --symbols-file data/historical/metadata/nifty100_batch4.txt` |
 
 ---
 
-## Appendix B – Change Log (Recent Phases)
+## Appendix B – Change Log (Recent)
 
-| Phase | Focus | Completion Date |
-|-------|-------|-----------------|
-| 6s | Promotion artifact validation | 2025-10-14 |
-| 6t | Resume test fix (gzip labels) | 2025-10-14 |
-| 6u | Documentation consolidation | 2025-10-14 |
-| 6v | Statistical tests out of dryrun | 2025-10-14 |
-| 6w | Real metric integration | 2025-10-14 |
+| Milestone | Focus | Date |
+|-----------|-------|------|
+| 7.1 | Batch 4 ingestion (OBEROI mapping fix) | 2025-10-28 |
+| 7.2 | Training telemetry instrumentation (`TrainingEvent` stream) | 2025-10-28 |
+| 7.3 | Batch 4 teacher/student run (`live_candidate_20251028_154400`) | 2025-10-28 |
+| 7.4 | Batch 5 ingestion (30 symbols, coverage 100%) | 2025-10-28 |
 | 6x | Telemetry resilience | 2025-10-14 |
-| 6v/6w Regression | Validation check | 2025-10-14 |
+| 6w | Real metrics integration | 2025-10-14 |
 | 6r | Release audit tolerance | 2025-10-14 |
 
-Refer to `docs/stories/us-028-historical-run.md` for detailed write-ups on each phase.
-
----
-
-**Contact & Support:**  
-See `claude.md#Contacts`. For production issues, open a ticket via `docs/ops/oncall.md` (if present) or notify the Ops Slack channel.
-
+**Contacts & Support:** See `claude.md#Contacts`. Production incidents follow Ops escalation procedures outlined there.

@@ -445,6 +445,12 @@ def parse_args() -> argparse.Namespace:
         help="Incremental mode (train only for new teacher runs)",
     )
 
+    parser.add_argument(
+        "--max-failure-rate",
+        type=float,
+        help="Max acceptable failure rate (0.0-1.0, default: from settings)",
+    )
+
     return parser.parse_args()
 
 
@@ -454,6 +460,13 @@ def main() -> int:
 
     # Load settings
     settings = Settings()  # type: ignore[call-arg]
+
+    # Override max_failure_rate if provided via CLI
+    if args.max_failure_rate is not None:
+        if not 0.0 <= args.max_failure_rate <= 1.0:
+            logger.error(f"--max-failure-rate must be between 0.0 and 1.0 (got {args.max_failure_rate})")
+            return 1
+        settings.batch_training_max_failure_rate = args.max_failure_rate
 
     # Determine teacher batch directory
     if args.teacher_batch_dir:
@@ -530,12 +543,34 @@ def main() -> int:
     logger.info(f"Student metadata: {trainer.student_metadata_file}")
     logger.info("=" * 70)
 
-    # Return exit code based on failures
-    if summary["student_failed"] > 0:
-        logger.warning(f"{summary['student_failed']} student trainings failed")
+    # Return exit code based on failure rate threshold (mirroring teacher batch logic)
+    total_students = summary['total_teacher_runs']
+    failed_students = summary['student_failed']
+    failure_rate = failed_students / total_students if total_students > 0 else 0.0
+    max_failure_rate = settings.batch_training_max_failure_rate
+
+    logger.info(
+        f"Student batch completion: {summary['student_completed']}/{total_students} succeeded, "
+        f"{failed_students} failed, {summary['student_skipped']} skipped"
+    )
+    logger.info(f"Failure rate: {failure_rate:.2%} (threshold: {max_failure_rate:.2%})")
+
+    if failure_rate > max_failure_rate:
+        logger.error(
+            f"Failure rate {failure_rate:.2%} exceeds threshold {max_failure_rate:.2%}. "
+            f"{failed_students}/{total_students} student trainings failed."
+        )
+        logger.error("Check student batch status for details")
         return 1
 
-    logger.info("All student trainings completed successfully")
+    if failed_students > 0:
+        logger.warning(
+            f"Student batch completed with {failed_students} expected failures ({failure_rate:.2%} "
+            f"≤ threshold {max_failure_rate:.2%})"
+        )
+    else:
+        logger.info("All student trainings completed successfully")
+
     return 0
 
 
