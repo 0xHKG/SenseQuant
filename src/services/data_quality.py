@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from loguru import logger
 
 
 class DataQualityService:

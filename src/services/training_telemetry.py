@@ -493,4 +493,4 @@ if __name__ == "__main__":
                         event = json.loads(line)
                         print(f"  {i}. {event['event_type']}: {event.get('message', 'N/A')}")
         else:
-            print(f"❌ Telemetry validation failed")
+            print("❌ Telemetry validation failed")

@@ -59,7 +59,6 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.services.accuracy_analyzer import AccuracyAnalyzer, AccuracyMetrics, PredictionTrace
-from src.services.training_telemetry import TrainingEvent
 
 
 def parse_args() -> argparse.Namespace:
@@ -134,9 +133,9 @@ def load_telemetry_data(telemetry_dir: str) -> tuple[list[PredictionTrace], list
         return [], []
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=10)
 def load_training_telemetry(telemetry_dir: str) -> dict[str, pd.DataFrame]:
-    """Load training telemetry from JSONL files (US-028 Phase 7).
+    """Load training telemetry from JSONL files AND teacher_runs.json (US-028 Phase 7).
 
     Args:
         telemetry_dir: Directory containing telemetry files
@@ -149,7 +148,37 @@ def load_training_telemetry(telemetry_dir: str) -> dict[str, pd.DataFrame]:
     telemetry_path = Path(telemetry_dir)
     training_runs = {}
 
-    # Scan training subdirectory and root for training_run_*.jsonl
+    # PRIORITY 1: Load LIVE data from teacher_runs.json in data/models/*/
+    models_dir = Path("data/models")
+    if models_dir.exists():
+        for run_dir in sorted(models_dir.iterdir(), reverse=True):
+            if not run_dir.is_dir():
+                continue
+
+            teacher_runs_file = run_dir / "teacher_runs.json"
+            if teacher_runs_file.exists():
+                try:
+                    events = []
+                    with open(teacher_runs_file) as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                event = json.loads(line)
+                                events.append(event)
+                            except json.JSONDecodeError:
+                                pass
+
+                    if events:
+                        df = pd.DataFrame(events)
+                        run_id = f"training_run_live_candidate_{run_dir.name}"
+                        training_runs[run_id] = df
+                        logger.info(f"Loaded {len(events)} LIVE events from {teacher_runs_file}")
+                except Exception as e:
+                    logger.error(f"Failed to load {teacher_runs_file}: {e}")
+
+    # PRIORITY 2: Load from JSONL telemetry files (for completed runs)
     training_dirs = [telemetry_path / "training", telemetry_path]
 
     for search_dir in training_dirs:
@@ -157,6 +186,10 @@ def load_training_telemetry(telemetry_dir: str) -> dict[str, pd.DataFrame]:
             continue
 
         for jsonl_file in search_dir.glob("training_run_*.jsonl"):
+            run_id = jsonl_file.stem
+            if run_id in training_runs:
+                continue  # Skip if already loaded from teacher_runs.json
+
             try:
                 events = []
                 with open(jsonl_file) as f:
@@ -172,7 +205,6 @@ def load_training_telemetry(telemetry_dir: str) -> dict[str, pd.DataFrame]:
 
                 if events:
                     df = pd.DataFrame(events)
-                    run_id = events[0].get("run_id", jsonl_file.stem)
                     training_runs[run_id] = df
                     logger.info(f"Loaded {len(events)} events from {jsonl_file.name}")
 
@@ -886,19 +918,29 @@ def render_training_telemetry_tab(telemetry_dir: str) -> None:
     summary_cols = st.columns(5)
 
     with summary_cols[0]:
-        st.metric("Total Events", len(df))
+        st.metric("Total Windows", len(df))
 
     with summary_cols[1]:
-        phases = df["phase"].dropna().unique()
-        st.metric("Phases", len(phases))
+        if "phase" in df.columns:
+            phases = df["phase"].dropna().unique()
+            st.metric("Phases", len(phases))
+        else:
+            # For teacher_runs.json which doesn't have phases
+            st.metric("Training Type", "Teacher")
 
     with summary_cols[2]:
-        symbols = df["symbol"].dropna().unique()
-        st.metric("Symbols", len(symbols))
+        if "symbol" in df.columns:
+            symbols = df["symbol"].dropna().unique()
+            st.metric("Symbols", len(symbols))
+        else:
+            st.metric("Symbols", "N/A")
 
     with summary_cols[3]:
-        success_count = len(df[df["status"] == "success"])
-        st.metric("Successes", success_count)
+        if "status" in df.columns:
+            success_count = len(df[df["status"] == "success"])
+            st.metric("Successes", success_count)
+        else:
+            st.metric("Successes", "N/A")
 
     with summary_cols[4]:
         if "duration_seconds" in df.columns:
@@ -909,32 +951,34 @@ def render_training_telemetry_tab(telemetry_dir: str) -> None:
 
     st.markdown("---")
 
-    # Phase progress table
-    st.subheader("Phase Progress")
-    phase_events = df[df["event_type"].str.contains("phase", na=False)]
+    # Phase progress table (only show if phase column exists)
+    if "phase" in df.columns and "event_type" in df.columns:
+        st.subheader("Phase Progress")
+        phases = df["phase"].dropna().unique()
+        phase_events = df[df["event_type"].str.contains("phase", na=False)]
 
-    if not phase_events.empty:
-        phase_summary = []
-        for phase in phases:
-            phase_df = df[df["phase"] == phase]
-            start_events = phase_df[phase_df["event_type"] == "phase_start"]
-            end_events = phase_df[phase_df["event_type"] == "phase_end"]
+        if not phase_events.empty:
+            phase_summary = []
+            for phase in phases:
+                phase_df = df[df["phase"] == phase]
+                start_events = phase_df[phase_df["event_type"] == "phase_start"]
+                end_events = phase_df[phase_df["event_type"] == "phase_end"]
 
-            phase_summary.append(
-                {
-                    "Phase": phase.replace("_", " ").title() if phase else "Unknown",
-                    "Status": "Complete" if not end_events.empty else "In Progress",
-                    "Events": len(phase_df),
-                    "Duration (min)": (
-                        f"{end_events.iloc[0]['duration_seconds'] / 60:.1f}"
-                        if not end_events.empty and "duration_seconds" in end_events.columns
-                        else "N/A"
-                    ),
-                }
-            )
+                phase_summary.append(
+                    {
+                        "Phase": phase.replace("_", " ").title() if phase else "Unknown",
+                        "Status": "Complete" if not end_events.empty else "In Progress",
+                        "Events": len(phase_df),
+                        "Duration (min)": (
+                            f"{end_events.iloc[0]['duration_seconds'] / 60:.1f}"
+                            if not end_events.empty and "duration_seconds" in end_events.columns
+                            else "N/A"
+                        ),
+                    }
+                )
 
-        phase_df_display = pd.DataFrame(phase_summary)
-        st.dataframe(phase_df_display, use_container_width=True)
+            phase_df_display = pd.DataFrame(phase_summary)
+            st.dataframe(phase_df_display, use_container_width=True)
     else:
         st.info("No phase events available")
 
@@ -942,9 +986,16 @@ def render_training_telemetry_tab(telemetry_dir: str) -> None:
 
     # Per-symbol window stats (for teacher training)
     st.subheader("Symbol Training Windows")
-    teacher_events = df[df["event_type"].str.contains("teacher_window", na=False)]
 
-    if not teacher_events.empty:
+    # Handle both teacher_runs.json format and telemetry JSONL format
+    if "event_type" in df.columns:
+        teacher_events = df[df["event_type"].str.contains("teacher_window", na=False)]
+    else:
+        # For teacher_runs.json, all rows are teacher training events
+        teacher_events = df
+
+    if not teacher_events.empty and "symbol" in teacher_events.columns:
+        symbols = teacher_events["symbol"].dropna().unique()
         symbol_stats = []
         for symbol in symbols:
             symbol_df = teacher_events[teacher_events["symbol"] == symbol]
@@ -973,12 +1024,16 @@ def render_training_telemetry_tab(telemetry_dir: str) -> None:
     # Timeline chart
     st.subheader("Event Timeline")
 
-    if not df.empty:
+    if not df.empty and "timestamp" in df.columns and "symbol" in df.columns and "status" in df.columns:
         # Convert timestamp to datetime
         df["timestamp_dt"] = pd.to_datetime(df["timestamp"])
 
         # Create timeline chart
-        timeline_df = df[df["event_type"].isin(["teacher_window_success", "teacher_window_skip", "teacher_window_fail"])]
+        if "event_type" in df.columns:
+            timeline_df = df[df["event_type"].isin(["teacher_window_success", "teacher_window_skip", "teacher_window_fail"])]
+        else:
+            # For teacher_runs.json, all rows are training events
+            timeline_df = df
 
         if not timeline_df.empty:
             fig = px.scatter(
@@ -994,6 +1049,8 @@ def render_training_telemetry_tab(telemetry_dir: str) -> None:
             st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("No timeline data available")
+    else:
+        st.info("Timeline chart unavailable (missing required columns)")
 
     st.markdown("---")
 

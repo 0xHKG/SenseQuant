@@ -663,6 +663,20 @@ class BatchTrainer:
             "macro_enabled": self.settings.enable_macro_features,
         }
 
+        # US-028 Phase 7: Track LightGBM GPU hyperparameters for profiling experiments
+        metadata["teacher_hyperparameters"] = {
+            "num_leaves": getattr(self.settings, "teacher_num_leaves", 127),
+            "max_depth": getattr(self.settings, "teacher_max_depth", 9),
+            "n_estimators": getattr(self.settings, "teacher_n_estimators", 500),
+            "learning_rate": getattr(self.settings, "teacher_learning_rate", 0.01),
+            "min_child_samples": getattr(self.settings, "teacher_min_child_samples", 20),
+            "subsample": getattr(self.settings, "teacher_subsample", 0.8),
+            "colsample_bytree": getattr(self.settings, "teacher_colsample_bytree", 0.8),
+            "gpu_use_dp": getattr(self.settings, "teacher_gpu_use_dp", False),
+            "gpu_platform_id": getattr(self.settings, "teacher_gpu_platform_id", 0),
+            "gpu_device_id": getattr(self.settings, "teacher_gpu_device_id", 0),
+        }
+
         # Append to JSON Lines file (thread-safe with lock)
         with self.metadata_lock:
             with open(self.metadata_file, "a") as f:
@@ -876,10 +890,13 @@ class BatchTrainer:
         with ProcessPoolExecutor(max_workers=self.workers) as executor:
             # Submit filtered tasks with GPU assignment
             future_to_task = {}
+            gpu_assignments = {}  # Track GPU distribution for logging
+
             for task_idx, task in enumerate(tasks_to_run):
                 # Round-robin GPU assignment
                 if self.num_gpus > 0:
                     gpu_id = self.available_gpus[task_idx % self.num_gpus]
+                    gpu_assignments[gpu_id] = gpu_assignments.get(gpu_id, 0) + 1
                 else:
                     gpu_id = None  # CPU fallback
 
@@ -888,18 +905,24 @@ class BatchTrainer:
                     task,
                     forecast_horizon,
                     self.settings,
-                    gpu_id,  # NEW: GPU assignment
+                    gpu_id,  # GPU assignment
                 )
-                future_to_task[future] = task
+                future_to_task[future] = (task, gpu_id)
+
+            # Log GPU distribution
+            if self.num_gpus > 0:
+                logger.info(f"GPU task distribution: {dict(gpu_assignments)}")
 
             # Process completed tasks with progress bar
             with tqdm(total=len(tasks_to_run), desc="Training teacher models (parallel)", unit="window") as pbar:
                 for i, future in enumerate(as_completed(future_to_task), 1):
-                    task = future_to_task[future]
+                    task, assigned_gpu = future_to_task[future]
                     try:
                         result = future.result()
+                        gpu_info = f" (GPU{assigned_gpu})" if assigned_gpu is not None else " (CPU)"
                         logger.info(
-                            f"[{i}/{len(tasks_to_run)}] Completed {task['window_label']}: {result['status']}"
+                            f"[{i}/{len(tasks_to_run)}] Completed {task['window_label']}: "
+                            f"{result['status']}{gpu_info}"
                         )
 
                         # Log metadata
@@ -967,15 +990,18 @@ class BatchTrainer:
         # US-028 Phase 7 Batch 4: Pin process to specific GPU
         import os
 
+        # Prepare environment with GPU assignment
+        # CRITICAL: Must set CUDA_VISIBLE_DEVICES in subprocess env, not parent process
+        worker_env = os.environ.copy()
         if gpu_id is not None:
-            os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+            worker_env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
             logger.info(
-                f"Worker assigned to GPU {gpu_id}",
+                f"Worker assigned to GPU {gpu_id} (CUDA_VISIBLE_DEVICES={gpu_id})",
                 extra={"symbol": task["symbol"], "window": task["window_label"]},
             )
         else:
             # CPU fallback (remove GPU from visibility)
-            os.environ["CUDA_VISIBLE_DEVICES"] = ""
+            worker_env["CUDA_VISIBLE_DEVICES"] = ""
             logger.warning(
                 "Worker using CPU (no GPU assigned)",
                 extra={"symbol": task["symbol"], "window": task["window_label"]},
@@ -988,7 +1014,7 @@ class BatchTrainer:
             if attempt > 1:
                 time.sleep(backoff_seconds)
 
-            # Build command
+            # Build command with explicit GPU device ID (US-028 Phase 7: Multi-GPU fix)
             cmd = [
                 sys.executable,
                 "scripts/train_teacher.py",
@@ -1002,12 +1028,17 @@ class BatchTrainer:
                 str(forecast_horizon),
             ]
 
+            # Add explicit GPU device ID to ensure LightGBM uses correct GPU
+            if gpu_id is not None:
+                cmd.extend(["--gpu-device-id", str(gpu_id)])
+
             try:
                 result = subprocess.run(
                     cmd,
                     capture_output=True,
                     text=True,
                     timeout=600,  # 10 minute timeout
+                    env=worker_env,  # Pass GPU assignment via environment
                 )
 
                 if result.returncode == 0:
@@ -1104,6 +1135,12 @@ def parse_args() -> argparse.Namespace:
         help="Incremental mode (train only windows with new data)",
     )
 
+    parser.add_argument(
+        "--max-failure-rate",
+        type=float,
+        help="Max acceptable failure rate (0.0-1.0, default: from settings)",
+    )
+
     return parser.parse_args()
 
 
@@ -1113,6 +1150,13 @@ def main() -> int:
 
     # Load settings
     settings = Settings()  # type: ignore[call-arg]
+
+    # Override max_failure_rate if provided via CLI (US-028 Phase 7)
+    if args.max_failure_rate is not None:
+        if not 0.0 <= args.max_failure_rate <= 1.0:
+            logger.error(f"--max-failure-rate must be between 0.0 and 1.0 (got {args.max_failure_rate})")
+            return 1
+        settings.batch_training_max_failure_rate = args.max_failure_rate
 
     # Use command-line args or settings defaults
     symbols = args.symbols if args.symbols else settings.historical_data_symbols
@@ -1187,15 +1231,34 @@ def main() -> int:
 
     logger.info("=" * 70)
 
-    # Return exit code based on failures
-    if summary["failed"] > 0:
-        logger.warning(
-            f"{summary['failed']} training windows failed after {settings.parallel_retry_limit} retries"
+    # Return exit code based on failure rate threshold (US-028 Phase 7 hardening)
+    total_windows = summary["total_windows"]
+    failed_windows = summary["failed"]
+    failure_rate = failed_windows / total_windows if total_windows > 0 else 0.0
+    max_failure_rate = settings.batch_training_max_failure_rate
+
+    logger.info(
+        f"Batch completion: {summary['completed']}/{total_windows} succeeded, "
+        f"{failed_windows} failed, {summary['skipped']} skipped"
+    )
+    logger.info(f"Failure rate: {failure_rate:.2%} (threshold: {max_failure_rate:.2%})")
+
+    if failure_rate > max_failure_rate:
+        logger.error(
+            f"Failure rate {failure_rate:.2%} exceeds threshold {max_failure_rate:.2%}. "
+            f"{failed_windows}/{total_windows} windows failed after {settings.parallel_retry_limit} retries."
         )
-        logger.warning("Check batch status in data/state/teacher_batch.json for details")
+        logger.error("Check batch status in data/state/teacher_batch.json for details")
         return 1
 
-    logger.info("All training windows completed successfully")
+    if failed_windows > 0:
+        logger.warning(
+            f"Batch completed with {failed_windows} expected failures ({failure_rate:.2%} "
+            f"≤ threshold {max_failure_rate:.2%})"
+        )
+    else:
+        logger.info("All training windows completed successfully")
+
     return 0
 
 
